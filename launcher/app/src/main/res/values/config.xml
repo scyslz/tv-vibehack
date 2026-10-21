@@ -1,12 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <!-- Apps pinned to the dock row at the bottom, in this order. Slot 0 is HDMI 2 (Jio TV). -->
-    <string-array name="dock_apps">
-        <item>hdmi_2</item>
+    <!-- Home screens that this launcher replaces. The stock one is never disabled, so it
+         remains a fail-safe fallback. Add your vendor's launcher package if it is missing. -->
+    <string-array name="stock_launchers">
+        <item>com.mitv.tvhome</item>
+        <item>com.google.android.tvlauncher</item>
+        <item>com.google.android.apps.tv.launcherx</item>
+        <item>com.google.android.leanbacklauncher</item>
+    </string-array>
+
+    <!-- Dock tiles on a fresh install. After that the user owns the list: long-press OK on a
+         tile in the grid to pin it (appended at the end) or remove it from the dock. -->
+    <string-array name="dock_defaults">
         <item>nlrc_pendrive</item>
-        <item>in.startv.hotstar</item>
-        <item>ahaflix.tv</item>
+        <item>org.smarttube.stable</item>
     </string-array>
 
     <!-- Apps never shown as tiles (Live TV is reachable via the Inputs menu instead). -->
@@ -17,10 +25,17 @@
         <item>com.realtek.tv.atsc</item>
         <item>com.realtek.tv.atv</item>
         <item>com.realtek.tv.isdb</item>
+        <item>com.droidlogic.tvinput</item>
     </string-array>
 
     <!-- The TV's Live TV / tuner app, offered at the end of the Inputs menu. -->
-    <string name="live_tv_package" translatable="false">com.realtek.tv</string>
+    <string name="live_tv_package" translatable="false">com.xiaomi.mitv.tvplayer</string>
+
+    <!-- Hardware source ids for TVs that expose TV inputs through Xiaomi's MiTVTVPlayer
+         (Amlogic Mi TV / Redmi TV). Values come from MiTVTVPlayer's ExternalSourceActivity. -->
+    <integer name="source_hdmi_1">2</integer>
+    <integer name="source_hdmi_2">18</integer>
+    <integer name="source_av">17</integer>
 
     <!-- Tiles per row in the grid; the dock always has this many slots. -->
     <integer name="columns">4</integer>

@@ -6,5 +6,4 @@
     android:canRequestFilterKeyEvents="true"
     android:canRetrieveWindowContent="false"
     android:description="@string/accessibility_service_description"
-    android:notificationTimeout="20"
-    android:packageNames="com.google.android.apps.tv.launcherx,com.netflix.ninja,com.amazon.amazonvideo.livingroom" />
+    android:notificationTimeout="20" />

@@ -36,6 +36,7 @@ public class PenDriveActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_pendrive_viewer);
+        Wallpapers.apply(this, (android.widget.ImageView) findViewById(R.id.bgWallpaper), false);
 
         cardPart1 = findViewById(R.id.cardPart1);
         cardPart2 = findViewById(R.id.cardPart2);

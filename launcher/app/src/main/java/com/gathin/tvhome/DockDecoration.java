@@ -21,10 +21,10 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
     DockDecoration(int dockSize, float density) {
         this.dockSize = dockSize;
         this.density = density;
-        band.setColor(0xFF141416);
+        band.setColor(0x5C0E1014);
         edge.setStyle(Paint.Style.STROKE);
         edge.setStrokeWidth(density);
-        edge.setColor(0x1FFFFFFF);
+        edge.setColor(0x24FFFFFF);
     }
 
     @Override
@@ -61,7 +61,19 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         float pad = 14 * density;
         rect.inset(-pad, -pad);
         float radius = 26 * density;
-        c.drawRoundRect(rect, radius, radius, band);
-        c.drawRoundRect(rect, radius, radius, edge);
+
+        // Scroll the dock row up and its tiles get clipped by RecyclerView's padding box, but
+        // item decorations are NOT clipped that way: the band would stay behind as a black slab
+        // in the middle of the screen. Clip the band ourselves so it always follows the tiles.
+        int save = c.save();
+        c.clipRect(parent.getPaddingLeft(),
+                parent.getPaddingTop(),
+                parent.getWidth() - parent.getPaddingRight(),
+                parent.getHeight() - parent.getPaddingBottom());
+        if (!rect.isEmpty()) {
+            c.drawRoundRect(rect, radius, radius, band);
+            c.drawRoundRect(rect, radius, radius, edge);
+        }
+        c.restoreToCount(save);
     }
 }

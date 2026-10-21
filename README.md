@@ -125,6 +125,7 @@ adb shell settings put secure accessibility_enabled 1
 | [`launcher/`](launcher/) | Native Android TV launcher with Apple tvOS aesthetics, D-pad navigation, ambient glow, and Direct Boot awareness. |
 | [`launcher/.../HomeKeyService.java`](launcher/app/src/main/java/com/gathin/tvhome/HomeKeyService.java) | Fail-safe Accessibility Service intercepting Home button and sponsored hotkeys. |
 | [`launcher/.../HdmiHelper.java`](launcher/app/src/main/java/com/gathin/tvhome/HdmiHelper.java) | Direct Realtek / Android TV hardware passthrough input launcher. |
+| [`launcher/.../Wallpapers.java`](launcher/app/src/main/java/com/gathin/tvhome/Wallpapers.java) | Rotating home wallpaper: one bundled landscape photo per 3-hour slot, plus your own photos from `/sdcard/Android/data/com.gathin.tvhome/files/wallpapers`. |
 | [`launcher/.../PenDriveActivity.java`](launcher/app/src/main/java/com/gathin/tvhome/PenDriveActivity.java) | Media viewer card UI for offline TV storage / USB playback. |
 | [`launcher/.../VideoPlayerActivity.java`](launcher/app/src/main/java/com/gathin/tvhome/VideoPlayerActivity.java) | Hardware-accelerated full-screen player with remote seek HUD and episode switching. |
 | [`examples/acer-v-pro-32-qled/`](examples/acer-v-pro-32-qled/) | Comprehensive teardown and architecture notes for Acer / MOKA Realtek RTD QLED TVs. |

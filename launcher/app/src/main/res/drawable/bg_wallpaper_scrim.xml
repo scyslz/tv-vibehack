@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Light darkening scrim over the wallpaper: white text stays readable without hiding the photo. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="270"
+        android:startColor="#66000000"
+        android:centerColor="#1F000000"
+        android:endColor="#99000000"
+        android:type="linear" />
+</shape>

@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
@@ -21,8 +22,6 @@ import android.graphics.drawable.Drawable;
 import android.media.tv.TvContract;
 import android.media.tv.TvInputInfo;
 import android.media.tv.TvInputManager;
-import android.net.Uri;
-import android.provider.Settings;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -39,8 +38,10 @@ import androidx.recyclerview.widget.RecyclerView;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -54,8 +55,10 @@ import java.util.Set;
 public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
     interface TileListener {
-        void onTileFocused(int position, View card);
-        boolean onTileVerticalKey(int position, int keyCode);
+        void onTileFocused(int position, View card, boolean dock);
+        boolean onTileVerticalKey(int position, int keyCode, boolean dock);
+        /** Long-press of OK: opens the pin / unpin menu for the tile. */
+        boolean onTileLongPress(int position, View card, boolean dock);
     }
 
     static final class Entry {
@@ -96,19 +99,31 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
     private final Context ctx;
     private final TileListener listener;
-    private final int dockSize;
-    private final List<String> favourites;
-    private final Set<String>  hidden;
-    private final List<Entry>  items = new ArrayList<>();
+    /** True for the adapter that feeds the pinned dock row. */
+    private final boolean dockOnly;
+    private final DockStore dockStore;
+    private final Set<String> hidden;
+    /** Tiles shown in the dock, in the order the user pinned them (max {@link #MAX_DOCK}). */
+    private final List<Entry> dockItems = new ArrayList<>();
+    /** Tiles shown in the app grid: apps only, never inputs, never dock tiles. */
+    private final List<Entry> gridItems = new ArrayList<>();
 
-    AppAdapter(Context ctx, TileListener listener, int dockSize) {
-        this.ctx        = ctx;
-        this.listener   = listener;
-        this.dockSize   = dockSize;
-        this.favourites = Arrays.asList(ctx.getResources().getStringArray(R.array.dock_apps));
-        this.hidden     = new HashSet<>(Arrays.asList(ctx.getResources().getStringArray(R.array.hidden_apps)));
+    /** A single dock row holds at most four tiles. */
+    static final int MAX_DOCK = 4;
+
+    AppAdapter(Context ctx, TileListener listener) {
+        this(ctx, listener, false);
     }
 
+    AppAdapter(Context ctx, TileListener listener, boolean dockOnly) {
+        this.ctx       = ctx;
+        this.listener  = listener;
+        this.dockOnly  = dockOnly;
+        this.dockStore = new DockStore(ctx);
+        this.hidden    = new HashSet<>(Arrays.asList(ctx.getResources().getStringArray(R.array.hidden_apps)));
+    }
+
+    /** Rebuilds the tile list from the package manager. */
     void reload() {
         PackageManager pm = ctx.getPackageManager();
         Intent probe = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
@@ -128,7 +143,32 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
             fresh.add(new Entry(label, new ComponentName(pkg, ri.activityInfo.name), banner, icon));
         }
 
-        // ── 2. TV Inputs (HDMI 1 / Jio TV, HDMI 2, AV) ──────────────────────
+        // ── 2. TV Inputs (HDMI 1, HDMI 2, AV, Live TV) ─────────────────────
+        // Xiaomi Mi TV / Redmi TV expose inputs through MiTVTVPlayer source ids.
+        // Other Android TV boxes use the standard TvContract passthrough channels.
+        boolean miPlayer = HdmiHelper.isMiPlayer(ctx);
+        if (miPlayer) {
+            int hdmi1 = ctx.getResources().getInteger(R.integer.source_hdmi_1);
+            int hdmi2 = ctx.getResources().getInteger(R.integer.source_hdmi_2);
+            int av = ctx.getResources().getInteger(R.integer.source_av);
+
+            fresh.add(new Entry("HDMI 1", "hdmi_1",
+                    createHdmiBanner(ctx, "HDMI 1", "Input", false, 0xFF141414, 0xFF222222),
+                    getDrawableSafe(ctx, R.drawable.ic_input),
+                    HdmiHelper.createMiSourceIntent(ctx, hdmi1), 0xFF555555));
+            fresh.add(new Entry("HDMI 2", "hdmi_2",
+                    createHdmiBanner(ctx, "HDMI 2", "Input", false, 0xFF0D1B2A, 0xFF1B263B),
+                    getDrawableSafe(ctx, R.drawable.ic_input),
+                    HdmiHelper.createMiSourceIntent(ctx, hdmi2), 0xFF0077EE));
+            fresh.add(new Entry("AV Input", "av_input",
+                    createHdmiBanner(ctx, "AV", "Composite", false, 0xFF141414, 0xFF222222),
+                    getDrawableSafe(ctx, R.drawable.ic_av),
+                    HdmiHelper.createMiSourceIntent(ctx, av), 0xFF555555));
+            fresh.add(new Entry("Live TV", "live_tv",
+                    createHdmiBanner(ctx, "TV", "Tuner", false, 0xFF1A1206, 0xFF2B1F08),
+                    getDrawableSafe(ctx, R.drawable.ic_livetv),
+                    HdmiHelper.createTvIntent(ctx), 0xFFCC8800));
+        } else {
         TvInputManager tim = (TvInputManager) ctx.getSystemService(Context.TV_INPUT_SERVICE);
         if (tim != null) {
             List<TvInputInfo> inputs = new ArrayList<>(tim.getTvInputList());
@@ -154,38 +194,25 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
                                 "vnd.android.cursor.item/channel")
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
 
-                Drawable fallbackIcon;
-                try {
-                    fallbackIcon = ctx.getDrawable(R.drawable.ic_input);
-                } catch (Exception ex) {
-                    fallbackIcon = ctx.getDrawable(android.R.drawable.ic_media_play);
-                }
-
                 if (isHdmi) {
                     String pkgKey = "hdmi_" + hdmiIdx;
-                    if (hdmiIdx == 2) {
-                        // Slot 0 in dock: HDMI 2 with connected Jio TV Set Top Box
-                        String title    = "HDMI 2";
-                        String sub      = isConnected ? "Jio TV" : "Set Top Box";
-                        String fullLabel = "HDMI 2 · Jio TV";
-                        Drawable banner = createHdmiBanner(ctx, title, sub, isConnected, 0xFF0D1B2A, 0xFF1B263B);
-                        fresh.add(new Entry(fullLabel, pkgKey, banner, fallbackIcon, switchIntent, 0xFF0077EE));
-                    } else {
-                        // HDMI 1 (or other HDMI)
-                        String title    = "HDMI " + hdmiIdx;
-                        String sub      = isConnected ? "Connected" : "No Device";
-                        String fullLabel = "HDMI " + hdmiIdx;
-                        Drawable banner = createHdmiBanner(ctx, title, sub, isConnected, 0xFF141414, 0xFF222222);
-                        fresh.add(new Entry(fullLabel, pkgKey, banner, fallbackIcon, switchIntent, 0xFF555555));
-                    }
+                    String title = "HDMI " + hdmiIdx;
+                    String sub = isConnected ? "Connected" : "No Device";
+                    int colour = (hdmiIdx == 2) ? 0xFF0077EE : 0xFF555555;
+                    Drawable banner = (hdmiIdx == 2)
+                            ? createHdmiBanner(ctx, title, sub, isConnected, 0xFF0D1B2A, 0xFF1B263B)
+                            : createHdmiBanner(ctx, title, sub, isConnected, 0xFF141414, 0xFF222222);
+                    fresh.add(new Entry(title, pkgKey, banner,
+                            getDrawableSafe(ctx, R.drawable.ic_input), switchIntent, colour));
                     hdmiIdx++;
                 } else {
-                    // AV Input
-                    String fullLabel = "AV Input";
-                    Drawable banner = createHdmiBanner(ctx, "AV", isConnected ? "Connected" : "Composite", isConnected, 0xFF141414, 0xFF222222);
-                    fresh.add(new Entry(fullLabel, "av_input", banner, fallbackIcon, switchIntent, 0xFF555555));
+                    fresh.add(new Entry("AV Input", "av_input",
+                            createHdmiBanner(ctx, "AV", isConnected ? "Connected" : "Composite",
+                                    isConnected, 0xFF141414, 0xFF222222),
+                            getDrawableSafe(ctx, R.drawable.ic_av), switchIntent, 0xFF555555));
                 }
             }
+        }
         }
 
         // ── 2b. NLRC PenDrive Viewer (Offline Media Part 1, 2, 3) ──────────
@@ -201,22 +228,79 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         fresh.add(new Entry("NLRC PenDrive Viewer", "nlrc_pendrive",
                 mediaBanner, fallbackPlayIcon, penDriveIntent, 0xFFFFB300));
 
-        // ── 3. Sort: Dock favourites first (Slot 0=hdmi_2, 1=nlrc_pendrive, 2=youtube, 3=hotstar) ─
-        Collections.sort(fresh, (a, b) -> {
-            int fa = favourites.indexOf(a.pkg);
-            int fb = favourites.indexOf(b.pkg);
-            if (fa >= 0 || fb >= 0) {
-                if (fa < 0) return 1;
-                if (fb < 0) return -1;
-                return Integer.compare(fa, fb);
-            }
-            return a.label.compareToIgnoreCase(b.label);
-        });
+        // ── 3. Dock: only the tiles the user pinned, in that order. Grid: apps only. ──────
+        Map<String, Entry> byKey = new HashMap<>();
+        for (Entry e : fresh) byKey.put(e.pkg, e);
 
-        items.clear();
-        items.addAll(fresh);
+        dockItems.clear();
+        for (String key : dockStore.keys()) {
+            if (dockItems.size() >= MAX_DOCK) break;
+            Entry e = byKey.remove(key);
+            if (e == null) continue;          // uninstalled app / port that no longer exists
+            dockItems.add(e);
+        }
+
+        // Inputs (HDMI / AV / Live TV) live in the Inputs menu and optionally in the dock,
+        // never in the app grid.
+        List<Entry> rest = new ArrayList<>();
+        for (Entry e : byKey.values()) if (!e.isInput) rest.add(e);
+        Collections.sort(rest, (a, b) -> a.label.compareToIgnoreCase(b.label));
+
+        gridItems.clear();
+        gridItems.addAll(rest);
+    }
+
+    /**
+     * Re-reads the pinned keys. The dock keeps its own adapter, so pinning a tile appends it at
+     * the end of the dock and drops it out of the grid.
+     */
+    void refreshDock() {
+        reload();
         notifyDataSetChanged();
     }
+
+    /** Label of a tile by key (used for the confirmation toast). */
+    String pinnedLabel(String key) {
+        for (Entry e : dockItems) if (e.pkg.equals(key)) return e.label;
+        for (Entry e : gridItems) if (e.pkg.equals(key)) return e.label;
+        return key;
+    }
+
+    /** Key ("pkg" or input id) of the entry behind an adapter position. */
+    String keyAt(int position) {
+        List<Entry> list = dockOnly ? dockItems : gridItems;
+        return position >= 0 && position < list.size() ? list.get(position).pkg : null;
+    }
+
+    /** Looks a tile up by key across the dock and the app grid. */
+    private Entry entryForKey(String key) {
+        if (key == null) return null;
+        for (Entry e : dockItems) if (key.equals(e.pkg)) return e;
+        for (Entry e : gridItems) if (key.equals(e.pkg)) return e;
+        return null;
+    }
+
+    /**
+     * Package name of a tile that can be uninstalled, or null for inputs, built-in tiles,
+     * this launcher itself and non-removable system apps.
+     */
+    String uninstallablePackage(String key) {
+        Entry e = entryForKey(key);
+        if (e == null || e.isInput || e.component == null) return null;
+        String pkg = e.pkg;
+        if (pkg == null || pkg.equals(ctx.getPackageName())) return null;
+        try {
+            ApplicationInfo ai = ctx.getPackageManager().getApplicationInfo(pkg, 0);
+            boolean system = (ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+            boolean updatedSystem = (ai.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0;
+            // Preinstalled apps cannot be removed; updated system apps can only drop their updates.
+            if (system && !updatedSystem) return null;
+        } catch (PackageManager.NameNotFoundException ex) {
+            return null;
+        }
+        return pkg;
+    }
+
 
     /**
      * Creates a sleek, high-definition rectangular banner for HDMI inputs matching
@@ -275,6 +359,15 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         return new BitmapDrawable(ctx.getResources(), bmp);
     }
 
+    /** getDrawable that never throws on old firmwares. */
+    private static Drawable getDrawableSafe(Context ctx, int resId) {
+        try {
+            return ctx.getDrawable(resId);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /**
      * Creates a sleek card banner for PenDrive / Local Media Viewer.
      */
@@ -310,7 +403,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         pBadgeText.setColor(Color.WHITE);
         pBadgeText.setTextSize(9f * d);
         pBadgeText.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        c.drawText("3 భాగాలు", w - (62 * d), 21 * d, pBadgeText);
+        c.drawText("3 部", w - (62 * d), 21 * d, pBadgeText);
 
         // 4. Main Title
         Paint pTitle = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -320,7 +413,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         pTitle.setShadowLayer(4f * d, 0, 2f * d, 0xDD000000);
         c.drawText("PenDrive Viewer", 14 * d, h - (26 * d), pTitle);
 
-        // 5. Subtitle (Telugu)
+        // 5. Subtitle
         Paint pSub = new Paint(Paint.ANTI_ALIAS_FLAG);
         pSub.setColor(0xFFFFD700); // Bright gold
         pSub.setTextSize(11f * d);
@@ -335,15 +428,13 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
     @Override
     public Holder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
         View v = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_app, parent, false);
-        return new Holder(v, listener);
+        return new Holder(v, listener, dockOnly);
     }
 
     @Override
     public void onBindViewHolder(@NonNull Holder h, int position) {
-        Entry e = items.get(position);
-        h.name.setText(e.label);
-        h.name.setVisibility(position < dockSize ? View.INVISIBLE : View.VISIBLE);
-        h.name.setAlpha(0f);
+        Entry e = entryAt(position);
+        if (e == null) return;
         h.card.setScaleX(1f);
         h.card.setScaleY(1f);
 
@@ -363,12 +454,9 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
         h.card.setOnClickListener(v -> launch(e));
         h.card.setOnLongClickListener(v -> {
-            if (e.isInput) return true;
-            Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.parse("package:" + e.pkg));
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            try { ctx.startActivity(i); } catch (ActivityNotFoundException ignored) {}
-            return true;
+            int pos = h.getBindingAdapterPosition();
+            return pos != RecyclerView.NO_POSITION && listener != null
+                    && listener.onTileLongPress(pos, h.card, dockOnly);
         });
     }
 
@@ -396,15 +484,23 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
     }
 
     @Override
-    public int getItemCount() { return items.size(); }
+    public int getItemCount() {
+        return (dockOnly ? dockItems : gridItems).size();
+    }
+
+    private Entry entryAt(int position) {
+        List<Entry> list = dockOnly ? dockItems : gridItems;
+        return position >= 0 && position < list.size() ? list.get(position) : null;
+    }
 
     String labelAt(int position) {
-        return position >= 0 && position < items.size() ? items.get(position).label : "";
+        Entry e = entryAt(position);
+        return e == null ? "" : e.label;
     }
 
     int ambientColorAt(int position) {
-        if (position < 0 || position >= items.size()) return 0xFF444444;
-        Entry e = items.get(position);
+        Entry e = entryAt(position);
+        if (e == null) return 0xFF444444;
         if (e.ambient == 0) e.ambient = vividColor(e.banner != null ? e.banner : e.icon);
         return e.ambient;
     }
@@ -453,15 +549,15 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         final ImageView banner;
         final ImageView icon;
         final TextView  label;
-        final TextView  name;
+        final boolean inDock;
 
-        Holder(View v, TileListener listener) {
+        Holder(View v, TileListener listener, boolean inDock) {
             super(v);
+            this.inDock = inDock;
             card   = v.findViewById(R.id.card);
             banner = v.findViewById(R.id.banner);
             icon   = v.findViewById(R.id.icon);
             label  = v.findViewById(R.id.label);
-            name   = v.findViewById(R.id.name);
 
             final float density = v.getResources().getDisplayMetrics().density;
             final float radius  = density * 16f;
@@ -478,7 +574,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
                 if (keyCode != KeyEvent.KEYCODE_DPAD_UP && keyCode != KeyEvent.KEYCODE_DPAD_DOWN) return false;
                 int pos = getBindingAdapterPosition();
                 return listener != null && pos != RecyclerView.NO_POSITION
-                        && listener.onTileVerticalKey(pos, keyCode);
+                        && listener.onTileVerticalKey(pos, keyCode, inDock);
             });
 
             card.setOnFocusChangeListener((view, focused) -> {
@@ -487,12 +583,9 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
                         .setDuration(focused ? 260 : 180)
                         .setInterpolator(new OvershootInterpolator(focused ? 1.6f : 0f))
                         .start();
-                name.animate().alpha(focused ? 1f : 0f)
-                        .translationY(focused ? density * 4f : -density * 6f)
-                        .setDuration(220).start();
                 int pos = getBindingAdapterPosition();
                 if (focused && listener != null && pos != RecyclerView.NO_POSITION) {
-                    listener.onTileFocused(pos, view);
+                    listener.onTileFocused(pos, view, inDock);
                 }
             });
         }
