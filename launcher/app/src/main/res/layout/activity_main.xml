@@ -57,7 +57,8 @@
         android:orientation="vertical"
         android:paddingStart="56dp"
         android:paddingEnd="56dp"
-        android:paddingTop="22dp">
+        android:paddingTop="22dp"
+        android:paddingBottom="28dp">
 
         <RelativeLayout
             android:layout_width="match_parent"
@@ -298,47 +299,42 @@
             android:layout_marginTop="8dp"
             android:background="#15FFFFFF" />
 
-        <!-- First row: the dock (HDMI inputs + favourite apps), always on top and never scrolled. -->
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/dock"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:paddingTop="6dp"
-            android:paddingBottom="6dp"
-            android:clipToPadding="false"
-            android:clipChildren="false"
-            android:overScrollMode="never"
-            android:scrollbars="none"
-            android:descendantFocusability="afterDescendants" />
-
-        <!-- Remaining app rows, scrolled below the dock. -->
-        <FrameLayout
+        <!-- Flexible gap: the tiles are anchored to the bottom of the screen, so the dock row sits
+             low and the second row unfolds upwards out of it. -->
+        <View
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="1"
-            android:layout_marginTop="6dp">
+            android:layout_weight="1" />
+
+        <!-- Two rows at most: the dock row, plus the app row the user is on.
+             The window clips the list, so the collapsed state shows the dock row only and the
+             expanded state shows the dock row as an ordinary grid row with one app row under it. -->
+        <FrameLayout
+            android:id="@+id/gridWindow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:clipChildren="true"
+            android:clipToPadding="true">
 
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/grid"
                 android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:paddingTop="0dp"
-                android:paddingBottom="0dp"
+                android:layout_height="wrap_content"
                 android:clipToPadding="true"
-                android:clipChildren="true"
+                android:clipChildren="false"
                 android:overScrollMode="never"
                 android:scrollbars="none"
                 android:descendantFocusability="afterDescendants" />
+
+            <!-- The glass highlight lives inside the window so it is clipped together with the
+                 tiles, and one row that is still off screen can never show a stray cursor. -->
+            <com.gathin.tvhome.GlassView
+                android:id="@+id/glass"
+                android:layout_width="10dp"
+                android:layout_height="10dp"
+                android:alpha="0"
+                android:importantForAccessibility="no" />
         </FrameLayout>
     </LinearLayout>
-
-    <!-- The single floating glass highlight that springs between tiles. -->
-    <com.gathin.tvhome.GlassView
-        android:id="@+id/glass"
-        android:layout_width="10dp"
-        android:layout_height="10dp"
-        android:alpha="0"
-        android:importantForAccessibility="no" />
 
 </FrameLayout>

@@ -2,24 +2,28 @@ package com.gathin.tvhome;
 
 import android.graphics.Canvas;
 import android.graphics.Paint;
-import android.graphics.Rect;
 import android.graphics.RectF;
 import android.view.View;
 
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
-/** Draws the tvOS style lighter band behind the first (dock) row and adds a gap below it. */
+/**
+ * Draws the tvOS style lighter band behind the first (dock) row.
+ *
+ * <p>The dock is the first row of the same list as the app tiles, so its band is faded out as soon
+ * as the user moves down into the app rows: at that point the row stops looking like a dock and the
+ * screen shows a plain two-row grid. See {@link MainActivity#setExpanded(boolean, boolean)}.
+ */
 public class DockDecoration extends RecyclerView.ItemDecoration {
 
-    private final int dockSize;
     private final float density;
     private final Paint band = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
+    private float alpha = 1f;
 
-    DockDecoration(int dockSize, float density) {
-        this.dockSize = dockSize;
+    DockDecoration(float density) {
         this.density = density;
         band.setColor(0x5C0E1014);
         edge.setStyle(Paint.Style.STROKE);
@@ -27,23 +31,31 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         edge.setColor(0x24FFFFFF);
     }
 
-    @Override
-    public void getItemOffsets(@NonNull Rect outRect, @NonNull View view, @NonNull RecyclerView parent,
-                               @NonNull RecyclerView.State state) {
-        int pos = parent.getChildAdapterPosition(view);
-        if (pos >= 0 && pos < dockSize) {
-            outRect.top = (int) (6 * density);
-            outRect.bottom = (int) (12 * density);
-        }
+    /** 1 = full dock band, 0 = no band at all (the row is just a grid row). */
+    void setAlpha(float value) {
+        alpha = Math.max(0f, Math.min(1f, value));
+    }
+
+    float getAlpha() {
+        return alpha;
+    }
+
+    private int dockCount(RecyclerView parent) {
+        RecyclerView.Adapter<?> a = parent.getAdapter();
+        return a instanceof AppAdapter ? ((AppAdapter) a).dockCount() : 0;
     }
 
     @Override
     public void onDraw(@NonNull Canvas c, @NonNull RecyclerView parent, @NonNull RecyclerView.State state) {
+        if (alpha < 0.01f) return;
+        int dockCount = dockCount(parent);
+        if (dockCount == 0) return;
+
         boolean any = false;
         for (int i = 0; i < parent.getChildCount(); i++) {
             View child = parent.getChildAt(i);
             int pos = parent.getChildAdapterPosition(child);
-            if (pos < 0 || pos >= dockSize) continue;
+            if (pos < 0 || pos >= dockCount) continue;
             View card = child.findViewById(R.id.card);
             if (card == null) continue;
             float l = child.getLeft() + card.getLeft();
@@ -58,22 +70,16 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
             }
         }
         if (!any) return;
-        float pad = 14 * density;
+
+        // Must stay inside the row's own 8dp padding, otherwise the band needs extra window height
+        // and the next row would peek out under the dock.
+        float pad = 8 * density;
         rect.inset(-pad, -pad);
         float radius = 26 * density;
 
-        // Scroll the dock row up and its tiles get clipped by RecyclerView's padding box, but
-        // item decorations are NOT clipped that way: the band would stay behind as a black slab
-        // in the middle of the screen. Clip the band ourselves so it always follows the tiles.
-        int save = c.save();
-        c.clipRect(parent.getPaddingLeft(),
-                parent.getPaddingTop(),
-                parent.getWidth() - parent.getPaddingRight(),
-                parent.getHeight() - parent.getPaddingBottom());
-        if (!rect.isEmpty()) {
-            c.drawRoundRect(rect, radius, radius, band);
-            c.drawRoundRect(rect, radius, radius, edge);
-        }
-        c.restoreToCount(save);
+        band.setAlpha((int) (0x5C * alpha));
+        edge.setAlpha((int) (0x24 * alpha));
+        c.drawRoundRect(rect, radius, radius, band);
+        c.drawRoundRect(rect, radius, radius, edge);
     }
 }

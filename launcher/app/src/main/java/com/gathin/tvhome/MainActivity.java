@@ -2,6 +2,7 @@ package com.gathin.tvhome;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.animation.ValueAnimator;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -37,6 +38,7 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.animation.AnimationUtils;
+import android.view.animation.DecelerateInterpolator;
 import android.view.animation.LayoutAnimationController;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -61,19 +63,33 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * tvOS style home: black, a pinned dock row, an app grid, and one glass highlight that springs between tiles.
+ * tvOS style home built around a two-row screen: the pinned dock is the first row of the app list
+ * and keeps its tvOS band only while it has focus; moving into the app rows turns it into an
+ * ordinary first row of the grid and unfolds one more row underneath. One glass highlight springs
+ * between tiles.
  */
 public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** Tiles per row and dock slots (res/values/config.xml, columns). Set in onCreate. */
     static int COLUMNS = 4;
+    /** Height of one tile row: the 78dp tile of item_app.xml plus its 8dp top and bottom padding. */
+    private static final int ROW_DP = 94;
+    /** Length of one grid page turn; short enough to feel instant, long enough to read as motion. */
+    private static final long ROW_SLIDE_MS = 150;
     private static final long MINUTE_MS = 60_000L;
     private String liveTvPkg;
 
     private AppAdapter adapter;
-    private AppAdapter dockAdapter;
     private RecyclerView grid;
-    private RecyclerView dock;
+    /** Clips the list to one row (collapsed, dock only) or two rows (expanded). */
+    private FrameLayout gridWindow;
+    private ViewGroup.LayoutParams windowLp;
+    private DockDecoration dockDeco;
+    private boolean expanded;
+    /** Height of one tile row (tile + its paddings). Two of them is the tallest the screen gets. */
+    private int rowPx;
+    private ValueAnimator windowAnim;
+    private ValueAnimator bandAnim;
     private FrameLayout root;
     private GlassView glass;
     private View ambient;
@@ -91,7 +107,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private float glassTargetX, glassTargetY;
     private boolean glassShown;
     private int lastFocused = 0;
-    private int lastDockFocused = 0;
+    /** Tile that owns the glass highlight, so it can follow the row when the window resizes. */
+    private View focusedCard;
+    /** Set when the rows were moved without a scroll event; the glass is re-glued before drawing. */
+    private boolean glassDirty;
     private float density;
 
     /** Bluetooth state: the pill shows the name of the connected accessory, not just "Bluetooth". */
@@ -171,25 +190,25 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         BootReceiver.ensureAccessibilityEnabled(this);
 
         grid = findViewById(R.id.grid);
+        gridWindow = findViewById(R.id.gridWindow);
+        rowPx = Math.round(ROW_DP * density);
+        // The list is one row taller than the window, so the next row is always laid out: pressing
+        // down can hand the focus over immediately and let the rows slide underneath the cursor.
+        ViewGroup.LayoutParams gridLp = grid.getLayoutParams();
+        gridLp.height = windowHeight(true) + rowPx;
+        grid.setLayoutParams(gridLp);
+        windowLp = gridWindow.getLayoutParams();
+        windowLp.height = windowHeight(false);
+
         grid.setLayoutManager(new GridLayoutManager(this, COLUMNS));
         grid.setHasFixedSize(true);
         grid.setItemAnimator(null);
         grid.setLayoutAnimation(new LayoutAnimationController(
                 AnimationUtils.loadAnimation(this, R.anim.tile_enter), 0.06f));
+        dockDeco = new DockDecoration(density);
+        grid.addItemDecoration(dockDeco);
         adapter = new AppAdapter(this, this);
         grid.setAdapter(adapter);
-
-        // The dock is its own list so it stays pinned at the bottom while the app rows scroll above it.
-        dock = findViewById(R.id.dock);
-        dock.setLayoutManager(new GridLayoutManager(this, COLUMNS));
-        dock.setHasFixedSize(true);
-        dock.setItemAnimator(null);
-        dock.addItemDecoration(new DockDecoration(COLUMNS, density));
-        dockAdapter = new AppAdapter(this, this, true);
-        dock.setAdapter(dockAdapter);
-        updateDockVisibility();
-
-        // App rows flow downward from under the dock, so no bottom-parking padding is needed.
 
         // Keep the glass glued to its tile while the grid scrolls.
         grid.addOnScrollListener(new RecyclerView.OnScrollListener() {
@@ -202,11 +221,21 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             }
         });
 
+        // Row snaps and window resizes move the tiles without a scroll event, so re-glue the
+        // highlight once the new layout is in place instead of leaving it on an empty spot.
+        grid.getViewTreeObserver().addOnPreDrawListener(() -> {
+            if (glassDirty) {
+                glassDirty = false;
+                syncGlassToFocus();
+            }
+            return true;
+        });
+
         // Liquid feel: soft springs on the highlight's position.
         springX = new SpringAnimation(glass, DynamicAnimation.TRANSLATION_X);
         springY = new SpringAnimation(glass, DynamicAnimation.TRANSLATION_Y);
         for (SpringAnimation s : new SpringAnimation[]{springX, springY}) {
-            s.setSpring(new SpringForce().setStiffness(260f).setDampingRatio(0.58f));
+            s.setSpring(new SpringForce().setStiffness(430f).setDampingRatio(0.82f));
         }
 
         btnBluetooth = findViewById(R.id.btnBluetooth);
@@ -234,7 +263,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // The drawableTint selector does not refresh compound-drawable icons on this TV, so tint
         // them by hand: dark on the warm highlight, white on the translucent pill.
         for (TextView pill : new TextView[]{(TextView) btnInputs, btnWifi, btnBluetooth, (TextView) btnSettings}) {
-            pill.setOnFocusChangeListener((v, focused) -> tintPill((TextView) v, focused));
+            pill.setOnFocusChangeListener((v, focused) -> {
+                tintPill((TextView) v, focused);
+                if (focused) setExpanded(false, true);   // back to the one-row dock view
+            });
             tintPill(pill, false);
         }
 
@@ -275,8 +307,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         heroName.setAlpha(0f);
         ambient.setAlpha(0f);
         adapter.reload();
-        dockAdapter.reload();
-        updateDockVisibility();
+        resetWindow();
         grid.scheduleLayoutAnimation();
         updateGreeting();
         updateFatherGreeting();
@@ -289,11 +320,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
         // Return to the tile we left from, or the first one.
         grid.post(() -> {
+            adoptMeasuredRow();
             View focused = getCurrentFocus();
-            if (focused != null && (grid.findContainingViewHolder(focused) != null
-                    || dock.findContainingViewHolder(focused) != null)) return;
-            if (lastFocused < 0 && dockAdapter.getItemCount() > 0) focusDock(lastDockFocused);
-            else focusTile(Math.max(0, lastFocused));
+            if (focused != null && grid.findContainingViewHolder(focused) != null) return;
+            focusTile(Math.max(0, lastFocused));
         });
     }
 
@@ -339,12 +369,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     // ---- glass highlight -------------------------------------------------------------------------
 
     @Override
-    public void onTileFocused(int position, View card, boolean inDock) {
-        if (inDock) lastDockFocused = position;
-        else lastFocused = position;
+    public void onTileFocused(int position, View card) {
+        lastFocused = position;
+        focusedCard = card;
         // Tile rect in root coordinates, using layout positions (ignores the scale animation).
         Rect r = new Rect(0, 0, card.getWidth(), card.getHeight());
-        root.offsetDescendantRectToMyCoords(card, r);
+        gridWindow.offsetDescendantRectToMyCoords(card, r);
         float pad = 6f * density;        // matches GlassView's glow inset
         float w = card.getWidth() * AppAdapter.FOCUS_SCALE + 2 * pad;
         float h = card.getHeight() * AppAdapter.FOCUS_SCALE + 2 * pad;
@@ -371,42 +401,54 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             springX.animateToFinalPosition(x);
             springY.animateToFinalPosition(y);
         }
-        View item = (View) card.getParent();
-        if (inDock) {
-            // The dock tiles already carry their own labels, and the app row above the dock leaves
-            // no room for a 48sp top-shelf title, so only the ambient glow follows dock focus.
-            showDockAmbient(position);
-        } else {
-            // No big title here: with the dock pinned there is only one app row on screen and a
-            // 48sp heading would land on top of the clock. The tile's own caption says the name.
-            showGridAmbient(position);
-            // Scroll just enough so the whole glass (not only the tile) is visible.
-            Rect want = new Rect(0, -(int) pad * 2, item.getWidth(), item.getHeight() + (int) pad);
-            grid.requestChildRectangleOnScreen(item, want, false);
-        }
+
+        // The dock row keeps its band while it has focus; moving into the app rows turns it into a
+        // plain first row of the grid and unfolds the second row.
+        boolean dockRow = adapter.isDockPosition(position);
+        setExpanded(!dockRow, true);
+        showAmbient(position);
     }
+
+    /**
+     * First row of the list that should sit at the top of the window: expanded, the focused row is
+     * the bottom one and the row above it is the top one; collapsed, the dock row is the only one.
+     */
+    private int topRowFor(int position) {
+        int row = position / COLUMNS;
+        return expanded ? Math.max(0, row - 1) : row;
+    }
+
+    /** Jumps the list to a row boundary without animating (used for far jumps and restores). */
+    private void snapRowsTo(int position) {
+        RecyclerView.LayoutManager lm = grid.getLayoutManager();
+        if (!(lm instanceof GridLayoutManager)) return;
+        ((GridLayoutManager) lm).scrollToPositionWithOffset(topRowFor(position) * COLUMNS, 0);
+        glassDirty = true;
+    }
+
+    /** How far the list is scrolled, in pixels; rows are uniform, so this inverts cleanly. */
+    private int scrollOffset() {
+        RecyclerView.LayoutManager lm = grid.getLayoutManager();
+        if (!(lm instanceof GridLayoutManager)) return 0;
+        GridLayoutManager glm = (GridLayoutManager) lm;
+        int first = glm.findFirstVisibleItemPosition();
+        if (first == RecyclerView.NO_POSITION) return 0;
+        View v = glm.findViewByPosition(first);
+        if (v == null) return 0;
+        return (first / COLUMNS) * rowPx - v.getTop();
+    }
+
 
     // ---- top shelf -------------------------------------------------------------------------------
 
-    /** App rows: tint the ambient glow to match the focused tile. */
-    private void showGridAmbient(int position) {
+    /** Tint the ambient glow to match the focused tile; no big title above the tiles. */
+    private void showAmbient(int position) {
         if (heroShown) {
             heroShown = false;
             heroName.animate().alpha(0f).setDuration(160).start();
         }
         setAmbient(adapter.ambientColorAt(position));
-        ambient.animate().alpha(1f).setDuration(240).start();
-    }
-
-    /** Dock focus: tint the ambient glow, no big title (it would cover the clock or a tile). */
-    private void showDockAmbient(int position) {
-        if (heroShown) {
-            heroShown = false;
-            heroName.animate().alpha(0f).setDuration(160).start();
-        }
-        int color = dockAdapter.ambientColorAt(position);
-        setAmbient(color);
-        ambient.animate().alpha(1f).setDuration(300).start();
+        ambient.animate().alpha(1f).setDuration(260).start();
     }
 
     private void setAmbient(int color) {
@@ -428,20 +470,129 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         glass.animate().alpha(0f).setDuration(160).start();
     }
 
-    // ---- navigation ------------------------------------------------------------------------------
+    // ---- one row / two rows ----------------------------------------------------------------------
 
     /**
-     * D-pad up/down follows what is on screen, top to bottom:
-     * top bar  ->  dock (first row)  ->  app rows.
+     * The screen never shows more than two rows. Collapsed: only the dock row, as a dock.
+     * Expanded: the dock row loses its band and becomes the first row of the grid, with the app row
+     * the user is on right below it.
      */
+    private void setExpanded(boolean want, boolean animate) {
+        if (want == expanded) return;
+        expanded = want;
+        animateWindow(want ? windowHeight(true) : windowHeight(false), animate);
+        animateBand(want ? 0f : 1f, animate);
+        // Back to one row: that row has to be the dock again, not whichever app row was on screen.
+        if (!want) {
+            grid.scrollToPosition(0);
+            glassDirty = true;
+        }
+    }
+
+    /** Puts the screen back in its resting state (one row = the dock, or two when no dock yet). */
+    private void resetWindow() {
+        boolean hasDock = adapter.dockCount() > 0;
+        expanded = !hasDock;
+        if (windowAnim != null) windowAnim.cancel();
+        if (bandAnim != null) bandAnim.cancel();
+        windowLp.height = windowHeight(expanded);
+        gridWindow.setLayoutParams(windowLp);
+        dockDeco.setAlpha(hasDock ? 1f : 0f);
+        grid.invalidate();   // NOT invalidateItemDecorations(): that throws during scroll / layout
+        if (!expanded) grid.scrollToPosition(0);
+        glassDirty = true;
+    }
+
+    /**
+     * Rows are height-defined by {@code item_app.xml}; if the layout ever measures them differently
+     * (bigger type scale, another tile size) the window follows the real height instead of clipping
+     * a sliver of the next row.
+     */
+    private void adoptMeasuredRow() {
+        if (grid.getChildCount() == 0) return;
+        int measured = grid.getChildAt(0).getHeight();
+        if (measured <= 0 || measured == rowPx) return;
+        rowPx = measured;
+        ViewGroup.LayoutParams gridLp = grid.getLayoutParams();
+        gridLp.height = windowHeight(true) + rowPx;
+        grid.setLayoutParams(gridLp);
+        if (windowAnim == null || !windowAnim.isRunning()) {
+            windowLp.height = windowHeight(expanded);
+            gridWindow.setLayoutParams(windowLp);
+        }
+    }
+
+    private int windowHeight(boolean twoRows) {
+        return (twoRows ? 2 : 1) * rowPx;
+    }
+
+    private void animateWindow(int target, boolean animate) {
+        if (windowAnim != null) windowAnim.cancel();
+        if (!animate || gridWindow.getHeight() == 0) {
+            windowLp.height = target;
+            gridWindow.setLayoutParams(windowLp);
+            glassDirty = true;
+            return;
+        }
+        windowAnim = ValueAnimator.ofInt(gridWindow.getHeight(), target);
+        windowAnim.setDuration(170);
+        windowAnim.setInterpolator(new DecelerateInterpolator(1.6f));
+        windowAnim.addUpdateListener(a -> {
+            windowLp.height = (int) a.getAnimatedValue();
+            gridWindow.setLayoutParams(windowLp);
+            // The block is bottom-anchored, so its rows slide while the window grows / shrinks.
+            glassDirty = true;
+        });
+        windowAnim.start();
+    }
+
+    /**
+     * Re-glues the glass highlight to the focused tile after the window changed height. The dock row
+     * moving under a fixed highlight is what looked like an empty tile popping up.
+     */
+    private void syncGlassToFocus() {
+        if (!glassShown || focusedCard == null || focusedCard.getParent() == null) return;
+        Rect r = new Rect(0, 0, focusedCard.getWidth(), focusedCard.getHeight());
+        gridWindow.offsetDescendantRectToMyCoords(focusedCard, r);
+        float pad = 6f * density;
+        float w = focusedCard.getWidth() * AppAdapter.FOCUS_SCALE + 2 * pad;
+        float h = focusedCard.getHeight() * AppAdapter.FOCUS_SCALE + 2 * pad;
+        glassTargetX = r.exactCenterX() - w / 2f;
+        glassTargetY = r.exactCenterY() - h / 2f;
+        springX.cancel();
+        springY.cancel();
+        glass.setTranslationX(glassTargetX);
+        glass.setTranslationY(glassTargetY);
+    }
+
+    /** Fades the dock band out (grid row) and back in (dock row). */
+    private void animateBand(float target, boolean animate) {
+        if (bandAnim != null) bandAnim.cancel();
+        if (!animate) {
+            dockDeco.setAlpha(target);
+            grid.invalidate();   // NOT invalidateItemDecorations(): that throws during scroll / layout
+            return;
+        }
+        bandAnim = ValueAnimator.ofFloat(dockDeco.getAlpha(), target);
+        bandAnim.setDuration(200);
+        bandAnim.addUpdateListener(a -> {
+            dockDeco.setAlpha((float) a.getAnimatedValue());
+            grid.invalidate();   // NOT invalidateItemDecorations(): that throws during scroll / layout
+        });
+        bandAnim.start();
+    }
+
+    // ---- navigation ------------------------------------------------------------------------------
+
     /**
      * Long-press of OK on a tile: pin it to the dock, or unpin it. New pins are appended, so the
      * dock keeps the order in which the tiles were added.
      */
     @Override
-    public boolean onTileLongPress(int position, View card, boolean inDock) {
-        String key = inDock ? dockAdapter.keyAt(position) : adapter.keyAt(position);
+    public boolean onTileLongPress(int position, View card) {
+        String key = adapter.keyAt(position);
         if (key == null) return true;
+        boolean inDock = adapter.isDockPosition(position);
         String label = adapter.pinnedLabel(key);
 
         View panel = getLayoutInflater().inflate(R.layout.popup_tile_menu, root, false);
@@ -457,17 +608,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (inDock) {
             addMenuRow(rows, popup, R.drawable.ic_unpin, "从 Dock 移除", () -> {
                 dockStore().remove(key);
-                refreshTiles();
+                refreshTiles(key);
                 Toast.makeText(this, "已从 Dock 移除：" + label, Toast.LENGTH_SHORT).show();
             });
         } else {
             addMenuRow(rows, popup, R.drawable.ic_pin, "固定到 Dock", () -> {
                 if (dockStore().size() >= AppAdapter.MAX_DOCK) {
-                    Toast.makeText(this, "Dock 只能放 4 个，请先移除一个", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(this, "Dock 只能放 " + AppAdapter.MAX_DOCK + " 个，请先移除一个",
+                            Toast.LENGTH_SHORT).show();
                     return;
                 }
                 dockStore().add(key);
-                refreshTiles();
+                refreshTiles(key);
                 Toast.makeText(this, "已固定到 Dock：" + label, Toast.LENGTH_SHORT).show();
             });
         }
@@ -543,7 +695,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             dockStore().remove(pendingUninstallKey);
             String label = pendingUninstallLabel;
             clearPendingUninstall();
-            refreshTiles();
+            refreshTiles(null);
             Toast.makeText(this, getString(R.string.uninstall_done, label), Toast.LENGTH_SHORT).show();
         } else {
             // User cancelled in the system installer.
@@ -558,88 +710,167 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         return dockStore;
     }
 
-    /** The dock row disappears completely when nothing is pinned. */
-    private void updateDockVisibility() {
-        boolean has = dockAdapter.getItemCount() > 0;
-        dock.setVisibility(has ? View.VISIBLE : View.GONE);
-    }
-
-    private void refreshTiles() {
-        adapter.refreshDock();
-        dockAdapter.refreshDock();
-        updateDockVisibility();
+    /** Rebuilds the list and keeps the focus on the tile the user just pinned / unpinned. */
+    private void refreshTiles(String focusKey) {
+        adapter.refresh();
+        final int wanted = focusKey != null ? adapter.positionOfKey(focusKey) : -1;
         grid.post(() -> {
-            if (lastFocused >= adapter.getItemCount()) lastFocused = Math.max(0, adapter.getItemCount() - 1);
-            if (lastDockFocused >= dockAdapter.getItemCount()) lastDockFocused = 0;
-            if (adapter.getItemCount() > 0) focusTile(lastFocused);
-            else focusDock(Math.max(0, dockAdapter.getItemCount() - 1));
+            if (adapter.realCount() == 0) return;
+            adoptMeasuredRow();
+            if (wanted >= 0) {
+                focusTile(wanted);
+                return;
+            }
+            if (lastFocused >= adapter.realCount()) {
+                lastFocused = Math.max(0, adapter.realCount() - 1);
+            }
+            focusTile(lastFocused);
         });
     }
 
+    /**
+     * Every row boundary is on a multiple of {@link #COLUMNS}, so up / down is exactly one row and
+     * left / right never leaves the row. The dock row is the first one; moving down into the app
+     * rows unfolds the second row, moving back up folds it away again.
+     */
     @Override
-    public boolean onTileVerticalKey(int position, int keyCode, boolean inDock) {
-        boolean dockVisible = dock.getVisibility() == View.VISIBLE;
+    public boolean onTileKey(int position, int keyCode) {
+        int count = adapter.realCount();
+        int col = position % COLUMNS;
+        int row = position / COLUMNS;
+        boolean inDock = adapter.isDockPosition(position);
+
+        // ---- the dock row: entered and left with UP / DOWN only ----
         if (inDock) {
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-                findViewById(R.id.btnInputs).requestFocus();
+                focusTopBar();
                 return true;
             }
-            if (adapter.getItemCount() == 0) return true;
-            // Down from the dock enters the app rows in the same column.
-            focusTile(Math.min(position, adapter.getItemCount() - 1));
-            return true;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                focusTile(position + COLUMNS);
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                if (col > 0) focusTile(position - 1);
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                // Stays inside the pinned tiles: the grid below is opened by pressing DOWN.
+                if (position + 1 < adapter.dockCount()) focusTile(position + 1);
+                return true;
+            }
+            return false;
         }
 
-        int count = adapter.getItemCount();
+        // ---- app rows ----
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            if (position < COLUMNS) {
-                // The first app row sits directly under the dock (or under the top bar).
-                if (dockVisible && dockAdapter.getItemCount() > 0) focusDock(position % COLUMNS);
-                else findViewById(R.id.btnInputs).requestFocus();
+            int above = position - COLUMNS;
+            if (above < 0) {
+                focusTopBar();
                 return true;
             }
-            focusTile(position - COLUMNS);
+            // Land on a real dock tile when the column above is an empty dock slot.
+            if (adapter.isDockRow(above)) above = Math.min(above, adapter.dockCount() - 1);
+            focusTile(above);
             return true;
         }
 
-        int lastRowStart = ((count - 1) / COLUMNS) * COLUMNS;
-        if (position >= lastRowStart) return true;     // bottom row: nothing below
-        focusTile(Math.min(position + COLUMNS, count - 1));
-        return true;
+        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+            int below = position + COLUMNS;
+            if (below >= count) {
+                // Last row: nothing below. Otherwise the row below is shorter than this column,
+                // so land on its nearest tile instead of swallowing the press.
+                if (row >= (count - 1) / COLUMNS) return true;
+                below = count - 1;
+            }
+            focusTile(below);
+            return true;
+        }
+
+        // Left / right also change rows at the ends of a row, like any grid. The dock row above is
+        // skipped on purpose: it is not a grid row, UP is what goes back into it.
+        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+            if (col > 0) {
+                focusTile(position - 1);
+                return true;
+            }
+            if (position > 0 && !adapter.isDockRow(position - 1)) focusTile(position - 1);
+            return true;
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+            if (col < COLUMNS - 1 && position + 1 < count) {
+                focusTile(position + 1);
+                return true;
+            }
+            int nextRowStart = (row + 1) * COLUMNS;
+            if (nextRowStart < count) focusTile(nextRowStart);
+            return true;
+        }
+        return false;
     }
 
-    /** Focuses a tile of the pinned dock row. */
-    private void focusDock(int position) {
-        if (dockAdapter.getItemCount() == 0) return;
-        int pos = Math.max(0, Math.min(position, dockAdapter.getItemCount() - 1));
-        RecyclerView.ViewHolder vh = dock.findViewHolderForAdapterPosition(pos);
-        if (vh != null) vh.itemView.findViewById(R.id.card).requestFocus();
-        else dock.post(() -> {
-            RecyclerView.ViewHolder h = dock.findViewHolderForAdapterPosition(pos);
-            if (h != null) h.itemView.findViewById(R.id.card).requestFocus();
-        });
+    /** Up from the top row: back to the pills, which also folds the second row away. */
+    private void focusTopBar() {
+        setExpanded(false, true);
+        findViewById(R.id.btnInputs).requestFocus();
     }
 
     private void focusTile(int position) {
-        if (adapter.getItemCount() == 0) return;
-        final int pos = Math.max(0, Math.min(position, adapter.getItemCount() - 1));
-        RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(pos);
-        if (vh != null) {
-            vh.itemView.findViewById(R.id.card).requestFocus();
+        if (adapter.realCount() == 0) return;
+        final int pos = Math.max(0, Math.min(position, adapter.realCount() - 1));
+        setExpanded(!adapter.isDockPosition(pos), true);
+
+        final int dy = topRowFor(pos) * rowPx - scrollOffset();
+        if (dy == 0) {
+            focusOrPost(pos);
             return;
         }
-        // Not laid out yet: scroll there, then focus once the scroll settles.
-        grid.addOnScrollListener(new RecyclerView.OnScrollListener() {
-            @Override
-            public void onScrollStateChanged(@NonNull RecyclerView rv, int newState) {
-                if (newState != RecyclerView.SCROLL_STATE_IDLE) return;
-                rv.removeOnScrollListener(this);
-                RecyclerView.ViewHolder h = rv.findViewHolderForAdapterPosition(pos);
-                View target = h != null ? h.itemView.findViewById(R.id.card) : rv.getChildAt(0);
-                if (target != null) target.requestFocus();
-            }
+        if (Math.abs(dy) > rowPx) {
+            // Too far for a one-row page turn (restore, pin / unpin): land there without animating.
+            snapRowsTo(pos);
+            focusOrPost(pos);
+            return;
+        }
+
+        // The next row is always laid out, so the cursor moves first and the rows slide under it —
+        // that reads as one motion instead of "wait, then jump".
+        if (requestFocusAt(pos)) {
+            slideRows(dy);
+            return;
+        }
+        grid.postDelayed(() -> {
+            if (requestFocusAt(pos)) slideRows(topRowFor(pos) * rowPx - scrollOffset());
+            else grid.postDelayed(() -> {
+                if (!requestFocusAt(pos)) focusOrPost(pos);
+            }, 60);
+        }, 32);
+    }
+
+    /**
+     * Slides one page turn, landing exactly on a row edge. The list is one row taller than the
+     * window and carries two empty rows at the end, so RecyclerView can always scroll by exactly
+     * one row and stop on the boundary.
+     */
+    private void slideRows(int dy) {
+        if (dy == 0) return;
+        grid.smoothScrollBy(0, dy);
+    }
+
+    private void focusOrPost(int position) {
+        if (requestFocusAt(position)) return;
+        grid.post(() -> {
+            if (!requestFocusAt(position)) grid.postDelayed(() -> requestFocusAt(position), 120);
         });
-        grid.smoothScrollToPosition(pos);
+    }
+
+    private boolean requestFocusAt(int position) {
+        RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(position);
+        if (vh == null) return false;
+        View card = vh.itemView.findViewById(R.id.card);
+        if (card == null || !card.isShown()) return false;
+        card.requestFocus();
+        return true;
     }
 
     // ---- top bar ---------------------------------------------------------------------------------
@@ -1068,12 +1299,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         row.setOnLongClickListener(v -> {
             boolean pinned = dockStore().contains(dockKey);
             if (!pinned && dockStore().size() >= AppAdapter.MAX_DOCK) {
-                Toast.makeText(this, "Dock 只能放 4 个，请先移除一个", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "Dock 只能放 " + AppAdapter.MAX_DOCK + " 个，请先移除一个",
+                        Toast.LENGTH_SHORT).show();
                 return true;
             }
             if (pinned) dockStore().remove(dockKey);
             else dockStore().add(dockKey);
-            refreshTiles();
+            refreshTiles(null);
             popup.dismiss();
             Toast.makeText(this, (pinned ? "已从 Dock 移除：" : "已固定到 Dock：") + title,
                     Toast.LENGTH_SHORT).show();

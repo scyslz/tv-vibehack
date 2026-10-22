@@ -230,3 +230,122 @@ adb -s 192.168.100.165:5555 shell am start -n com.gathin.tvhome/.MainActivity
 7. 磁贴不再有独立名称行，图标与卡片无重叠
 
 > 注意：Dock 的固定列表保存在应用私有 SharedPreferences，`adb shell pm clear com.gathin.tvhome` 会重置为首次安装的默认两项（`nlrc_pendrive`、`org.smarttube.stable`）。
+
+---
+
+## 9. 本轮改动（Dock 与网格合并成一屏两行，versionCode 3 / 2.1）
+
+### 9.1 需求
+原来屏幕上是 **3 行**：Dock 一行 + 网格两行。要求：
+1. 默认只显示 **第一行**，也就是 Dock 栏（带 Dock 浅色底板）
+2. 按 ↓ 之后才「展开」出第二行，变成 **两行网格**
+3. 展开后第一行的 Dock **就是网格的第一行**，**不再有 Dock 样式**（底板消失、行距与网格一致）
+4. **整屏最多两行**（无论装了多少应用）
+
+### 9.2 实现
+不再用两个 RecyclerView，**Dock 与网格合并成同一个列表**（`AppAdapter.items`）：
+- 前 `dockCount` 个位置 = 用户固定的 Dock 磁贴（顺序＝固定顺序，最多 `columns` 个）
+- 中间用**不可见占位磁贴**把 Dock 行补齐到一整行，保证每个真实磁贴都从行首开始，
+  于是「上/下」永远是精确的一行（`position ± columns`），左右不会跑出本行
+- 之后是真实应用（输入源仍然不进网格）
+
+一屏两行的做法（`MainActivity.setExpanded()`）：
+- 列表本身固定在 **两行高度**，外面套一个 `gridWindow`（`activity_main.xml`），
+  只改变这个窗口的高度：**收起＝一行高**，**展开＝两行高**，用 `ValueAnimator` 做 220ms 缓动
+- 因为只是外层裁剪窗口变高变矮，RecyclerView 不做重新布局，动画过程中磁贴不跳动，
+  焦点也不会丢
+- **Dock 行靠近屏幕底部**：`activity_main.xml` 里在分隔线与 `gridWindow` 之间加了一个
+  `layout_weight=1` 的弹性空隙，磁贴区因此被压到屏幕下方；父布局 `paddingBottom=28dp` 留出呼吸。
+  窗口变高时弹性空隙同步变矮，所以**底边固定不动、第二行向上展开**（展开⇄收起不会有横线抖动）
+- `DockDecoration` 新增 `alpha`：聚焦在 Dock 行时 = 1（浅色底板 + 描边），
+  一进入应用行就 200ms 淡出到 0，Dock 行于是变成普通的网格第一行；
+  回到 Dock 行再淡入
+- **行高与窗口严格对齐（避免「两行半」）**：窗口高 = 行高 × 行数 = 94dp × 1 或 2，
+  RecyclerView 不再留 padding，底板内缩 8dp（正好落在 `item_app.xml` 自带的 8dp 内边距里），
+  所以收起时不会露出下一行、展开时正好两行
+- **滚动按行吸附**：`snapRowsTo()` 用 `scrollToPositionWithOffset(行首, 0)` 把「展开时当前行、
+  收起时 Dock 行」贴到窗口顶部，永远不会停在两行中间（原来会上下各露出半行）
+- **高亮跟着行走**：窗口高度动画 / 行吸附都不触发 `onScrolled`，所以用 `glassDirty` 标记，
+  在 `OnPreDrawListener` 里按新布局重新贴合高亮，避免出现一个「空的玻璃框」
+
+焦点行为：
+- 顶栏胶囊（Inputs / Wi-Fi / 蓝牙 / 设置）获得焦点 → 收起回一行（只剩 Dock）
+- Dock 行按 ↓ → 展开两行，焦点落到同一列的应用；继续按 ↓ 两行一起上滚（Dock 行随之滚走）
+- 应用行按 ↑ 到 Dock 行 → 收起回一行，并滚回顶部
+- 顶栏按 ↓ / Dock 行按 ↑ → 在顶栏与 Dock 之间移动；行首行尾不会穿模到别的行
+
+其它：
+- 由于 Dock 行是同一个列表的第一行，`DockStore` 的固定 / 移除逻辑不变（追加到末尾、从 Dock 移除），
+  固定 / 移除后焦点会跟到该磁贴的新位置（`AppAdapter.positionOfKey()`）
+- `Dock 只能放 N 个` 的提示改为读 `AppAdapter.MAX_DOCK`（= `min(4, columns)`）
+- 行高默认按 `item_app.xml` 的 78dp 磁贴 + 8dp 上下内边距 = 94dp 计算（`ROW_DP`）；
+  首次布局后会用实测高度校正（`adoptMeasuredRow()`），改磁贴尺寸也不会切掉半行
+- **已在真机验证**（2026-10-22 19:2x，`versionCode 3`）：收起=一行 Dock（有底板）、
+  ↓ 展开成两行且 Dock 行失去底板、继续 ↓ 两行按行滚动、↑ 回到 Dock 行并收起、
+  再 ↑ 回到顶栏胶囊；全程无半行、无空高亮框
+- 版本号 `versionCode 3` / `versionName 2.1`，`assembleDebug` 已构建成功
+
+### 9.3 改动文件
+- `AppAdapter.java`：Dock 与网格合并成单列表、占位槽、`dockCount()/isDockPosition()/isDockRow()/positionOfKey()`
+- `MainActivity.java`：`gridWindow` 两行裁剪窗口、`setExpanded()/resetWindow()/animateWindow()/animateBand()`、
+  单列表键位处理 `onTileKey()`、`refreshTiles(focusKey)`
+- `DockDecoration.java`：只负责 Dock 行底板，可淡入淡出，行距与网格一致（不再有额外偏移）
+- `activity_main.xml`：删除独立 `dock` RecyclerView，改为 `gridWindow` + 单个 `grid`
+- `app/build.gradle`：versionCode 3 / versionName 2.1
+
+### 9.4 装机验证（待连上电视后执行）
+```bash
+adb connect 192.168.100.165:5555
+adb -s 192.168.100.165:5555 install -r launcher/app/build/outputs/apk/debug/app-debug.apk
+adb -s 192.168.100.165:5555 shell "settings put secure enabled_accessibility_services \
+  com.xiaomi.voicecontrol/com.xiaomi.voicecontrol.VoiceAccessibilityService:com.gathin.tvhome/com.gathin.tvhome.HomeKeyService; \
+  settings put secure accessibility_enabled 1"
+adb -s 192.168.100.165:5555 shell am force-stop com.gathin.tvhome
+# 逐帧看效果：默认一行 Dock → 按 ↓ 展开两行 → 按 ↑ 收回
+adb -s 192.168.100.165:5555 shell input keyevent 20   # DOWN
+adb -s 192.168.100.165:5555 exec-out screencap -p > shot_expanded.png
+adb -s 192.168.100.165:5555 shell input keyevent 19   # UP
+adb -s 192.168.100.165:5555 exec-out screencap -p > shot_collapsed.png
+```
+> 若展开/收起的间距与预期不符，只需调整 `MainActivity.rowPx`（默认 94dp）与
+> `bandPadPx`（默认 10dp）两处，或直接改 `item_app.xml` 的磁贴高度。
+
+---
+
+## 10. 本轮追加（2026-10-22 晚，翻页过渡与键位修正）
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 1 | 翻页是「瞬间吸附」，很生硬 | 行切换改为滑动：`MainActivity.slideRows()` 用 `RecyclerView.smoothScrollBy(0, dy)`，落点仍是精确的行边界（dy = 行号×94dp） |
+| 2 | 从第 2 行到第 3 行时光标「迟疑 / 徘徊」 | 列表高度改为 **窗口 + 1 行**，下一行永远已布局，所以按下即移焦、行再在光标下滑动（原来要等滚动结束才交接高亮） |
+| 3 | 行根本没动、焦点跑空（隐藏 bug） | 列表比窗口高一行后，若内容总高恰好等于视口，RecyclerView 会判定 `canScrollVertically(false)`，任何滚动都无效。**在列表尾部补两行空白占位**（`AppAdapter.realCount()` 之外的尾行），保证永远可滚 |
+| 4 | 收起/展开时出现「空的高亮框」 | 高亮 `GlassView` 从 `root` 移进 `gridWindow`，与磁贴一起被窗口裁剪；另加 `glassDirty` + `OnPreDrawListener`，行吸附/窗口动画后按新布局重新贴合 |
+| 5 | 光标偏慢、拖滞 | 弹簧 `stiffness 260→430`、`damping 0.58→0.82`；窗口 1↔2 行动画 `220ms→170ms` |
+| 6 | 末行只有一个磁贴时，从第 2/3/4 列按 ↓ 无反应 | `onTileKey` DOWN：下方行比当前列短时落到**下一行最近的磁贴**（`count-1`），只有真的在最后一行才吞掉按键 |
+
+其它：`AppAdapter.realCount()` 排除尾部空白行，上下左右与焦点恢复都以它为准，空白行永远不会被聚焦。
+真机已验证：一行 Dock ⇄ 两行网格、跨行滑动、末行短行向下跳转、长按固定/移除后焦点跟随均正常。
+
+---
+
+## 11. 本轮追加（2026-10-22 夜，键位换行与「黑闪」崩溃修复）
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 1 | 网格里在行首/行尾按 ←/→ 出不去，只能靠 ↑/↓ 换行 | `onTileKey` 的应用行分支支持**左右换行**：行尾 → 下一行首；行首 → 上一行尾；最后一行首再往前、最后一行尾再往后则停住 |
+| 2 | Dock 行要不要也支持左右换行 | **不支持**，保持「只能 ↑/↓ 进出」：Dock 行内 ←/→ 只在固定的几个磁贴之间移动，按 ↓ 才展开成网格。这样「一行 Dock ⇄ 两行网格」的进入/退出路径唯一，不会误触 |
+| 3 | Dock 行不是整行时（固定数 < 4），行尾按 → 不能跳到应用 | 同上，Dock 行是一个独立区域，不参与网格换行 |
+| 4 | 末行只有 1 个磁贴时，第 2/3/4 列按 ↓ 无反应 | 落点取「下一行最近的磁贴」（`count-1`），只有真在最后一行才吞掉按键 |
+| 5 | **从网格固定到 Dock，整屏黑一下** | 实为崩溃：`animateBand` 的动画帧里调用了 `RecyclerView.invalidateItemDecorations()`，而滚动/布局过程中该调用会抛 `IllegalStateException: Cannot invalidate item decorations during a scroll or layout` → 进程被杀 → 桌面重启 → 黑屏一闪。改为 `grid.invalidate()`（只重绘、不触发 decorations 断言） |
+| 6 | 代码清理 | 删除不再使用的 `tileView()` 辅助方法；去掉调试日志 |
+
+键位最终规则（`MainActivity.onTileKey`）：
+
+```
+顶栏胶囊  ──↓──▶  Dock 行（收起，1 行）
+Dock 行   ──↓──▶  应用行（展开，2 行）；──↑──▶ 顶栏
+应用行     ──↑/↓──  逐行移动；──←/→── 行内移动，行首/行尾自动换到上一行尾/下一行首
+```
+
+真机已验证：Dock 行 → 网格 → 行内左右 → 行尾换行到下一行 → 行首换行回上一行；Dock 行内左右不进入网格；
+高频 ↑/↓ 连按（压力测试）无崩溃、无黑闪。

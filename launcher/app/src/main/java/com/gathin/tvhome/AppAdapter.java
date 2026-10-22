@@ -45,20 +45,21 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * App tiles + HDMI/Jio input tiles.
- * First {@link MainActivity#COLUMNS} positions are the pinned dock:
- * Slot 0: HDMI 2 · Jio TV
- * Slot 1: Netflix
- * Slot 2: YouTube
- * Slot 3: JioHotstar
+ * One flat list for the whole home screen: the pinned dock tiles are its first row, the app tiles
+ * follow. Because the dock is the first row of the same grid, it can stop looking like a dock the
+ * moment the user moves down into the app rows (see {@link DockDecoration} and
+ * {@link MainActivity#setExpanded(boolean, boolean)}), which keeps the screen at two rows.
+ *
+ * <p>The dock row is padded with invisible placeholder slots so every real tile starts on a row
+ * boundary: {@code position ± columns} is always "one row up / down".
  */
 public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
     interface TileListener {
-        void onTileFocused(int position, View card, boolean dock);
-        boolean onTileVerticalKey(int position, int keyCode, boolean dock);
+        void onTileFocused(int position, View card);
+        boolean onTileKey(int position, int keyCode);
         /** Long-press of OK: opens the pin / unpin menu for the tile. */
-        boolean onTileLongPress(int position, View card, boolean dock);
+        boolean onTileLongPress(int position, View card);
     }
 
     static final class Entry {
@@ -99,28 +100,28 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
     private final Context ctx;
     private final TileListener listener;
-    /** True for the adapter that feeds the pinned dock row. */
-    private final boolean dockOnly;
     private final DockStore dockStore;
     private final Set<String> hidden;
+    /** Tiles per row; the dock row is exactly this many slots wide. */
+    private final int columns;
+
     /** Tiles shown in the dock, in the order the user pinned them (max {@link #MAX_DOCK}). */
     private final List<Entry> dockItems = new ArrayList<>();
     /** Tiles shown in the app grid: apps only, never inputs, never dock tiles. */
     private final List<Entry> gridItems = new ArrayList<>();
+    /** What the list actually shows: dock, invisible placeholder slots, then the apps. */
+    private final List<Entry> items = new ArrayList<>();
 
-    /** A single dock row holds at most four tiles. */
-    static final int MAX_DOCK = 4;
+    /** A dock row holds at most one full row of tiles. */
+    static int MAX_DOCK = 4;
 
     AppAdapter(Context ctx, TileListener listener) {
-        this(ctx, listener, false);
-    }
-
-    AppAdapter(Context ctx, TileListener listener, boolean dockOnly) {
         this.ctx       = ctx;
         this.listener  = listener;
-        this.dockOnly  = dockOnly;
         this.dockStore = new DockStore(ctx);
         this.hidden    = new HashSet<>(Arrays.asList(ctx.getResources().getStringArray(R.array.hidden_apps)));
+        this.columns   = Math.max(1, ctx.getResources().getInteger(R.integer.columns));
+        MAX_DOCK       = Math.min(4, columns);
     }
 
     /** Rebuilds the tile list from the package manager. */
@@ -248,15 +249,58 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
         gridItems.clear();
         gridItems.addAll(rest);
+
+        // ── 4. The list the RecyclerView sees: dock row, placeholder slots, then the apps ──
+        items.clear();
+        items.addAll(dockItems);
+        // Pad the dock row with empty slots so the first app tile always starts a new row.
+        if (!dockItems.isEmpty()) {
+            while (items.size() < columns) items.add(null);
+        }
+        items.addAll(gridItems);
+        // Two empty rows at the end. The list is one row taller than the visible window, and a
+        // RecyclerView whose content is exactly as tall as its own viewport reports
+        // canScrollVertically(false): with nothing to page into, the rows could never slide.
+        for (int i = 0; i < columns * 2; i++) items.add(null);
+    }
+
+    /** Positions 0 .. realCount()-1 hold real tiles; the tail is the empty page-down room. */
+    int realCount() {
+        return Math.max(0, items.size() - columns * 2);
     }
 
     /**
-     * Re-reads the pinned keys. The dock keeps its own adapter, so pinning a tile appends it at
-     * the end of the dock and drops it out of the grid.
+     * Re-reads the pinned keys. Pinning moves a tile into the dock row, unpinning sends it back
+     * to the app list, so the whole list has to be rebuilt.
      */
-    void refreshDock() {
+    void refresh() {
         reload();
         notifyDataSetChanged();
+    }
+
+    /** Number of pinned tiles; the dock row is the first {@code dockCount()} positions. */
+    int dockCount() {
+        return dockItems.size();
+    }
+
+    /** True when the position is part of the (visible) dock row, including its empty slots. */
+    boolean isDockRow(int position) {
+        return !dockItems.isEmpty() && position >= 0 && position < columns;
+    }
+
+    /** True when the position is a real pinned tile of the dock row. */
+    boolean isDockPosition(int position) {
+        return position >= 0 && position < dockItems.size();
+    }
+
+    /** Adapter position of a tile key, or -1. */
+    int positionOfKey(String key) {
+        if (key == null) return -1;
+        for (int i = 0; i < items.size(); i++) {
+            Entry e = items.get(i);
+            if (e != null && key.equals(e.pkg)) return i;
+        }
+        return -1;
     }
 
     /** Label of a tile by key (used for the confirmation toast). */
@@ -266,10 +310,10 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         return key;
     }
 
-    /** Key ("pkg" or input id) of the entry behind an adapter position. */
+    /** Key ("pkg" or input id) of the entry behind a position, or null for an empty dock slot. */
     String keyAt(int position) {
-        List<Entry> list = dockOnly ? dockItems : gridItems;
-        return position >= 0 && position < list.size() ? list.get(position).pkg : null;
+        Entry e = entryAt(position);
+        return e == null ? null : e.pkg;
     }
 
     /** Looks a tile up by key across the dock and the app grid. */
@@ -428,15 +472,26 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
     @Override
     public Holder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
         View v = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_app, parent, false);
-        return new Holder(v, listener, dockOnly);
+        return new Holder(v, listener);
     }
 
     @Override
     public void onBindViewHolder(@NonNull Holder h, int position) {
-        Entry e = entryAt(position);
-        if (e == null) return;
         h.card.setScaleX(1f);
         h.card.setScaleY(1f);
+        Entry e = entryAt(position);
+        if (e == null) {
+            // Empty slot that keeps the dock row as wide as the grid.
+            h.itemView.setVisibility(View.INVISIBLE);
+            h.card.setFocusable(false);
+            h.card.setClickable(false);
+            h.card.setOnClickListener(null);
+            h.card.setOnLongClickListener(null);
+            return;
+        }
+        h.itemView.setVisibility(View.VISIBLE);
+        h.card.setFocusable(true);
+        h.card.setClickable(true);
 
         if (e.banner != null) {
             h.banner.setImageDrawable(e.banner);
@@ -456,7 +511,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         h.card.setOnLongClickListener(v -> {
             int pos = h.getBindingAdapterPosition();
             return pos != RecyclerView.NO_POSITION && listener != null
-                    && listener.onTileLongPress(pos, h.card, dockOnly);
+                    && listener.onTileLongPress(pos, h.card);
         });
     }
 
@@ -485,12 +540,11 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
     @Override
     public int getItemCount() {
-        return (dockOnly ? dockItems : gridItems).size();
+        return items.size();
     }
 
     private Entry entryAt(int position) {
-        List<Entry> list = dockOnly ? dockItems : gridItems;
-        return position >= 0 && position < list.size() ? list.get(position) : null;
+        return position >= 0 && position < items.size() ? items.get(position) : null;
     }
 
     String labelAt(int position) {
@@ -549,11 +603,9 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         final ImageView banner;
         final ImageView icon;
         final TextView  label;
-        final boolean inDock;
 
-        Holder(View v, TileListener listener, boolean inDock) {
+        Holder(View v, TileListener listener) {
             super(v);
-            this.inDock = inDock;
             card   = v.findViewById(R.id.card);
             banner = v.findViewById(R.id.banner);
             icon   = v.findViewById(R.id.icon);
@@ -571,10 +623,13 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
             card.setOnKeyListener((view, keyCode, event) -> {
                 if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
-                if (keyCode != KeyEvent.KEYCODE_DPAD_UP && keyCode != KeyEvent.KEYCODE_DPAD_DOWN) return false;
+                if (keyCode != KeyEvent.KEYCODE_DPAD_UP && keyCode != KeyEvent.KEYCODE_DPAD_DOWN
+                        && keyCode != KeyEvent.KEYCODE_DPAD_LEFT && keyCode != KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    return false;
+                }
                 int pos = getBindingAdapterPosition();
                 return listener != null && pos != RecyclerView.NO_POSITION
-                        && listener.onTileVerticalKey(pos, keyCode, inDock);
+                        && listener.onTileKey(pos, keyCode);
             });
 
             card.setOnFocusChangeListener((view, focused) -> {
@@ -585,7 +640,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
                         .start();
                 int pos = getBindingAdapterPosition();
                 if (focused && listener != null && pos != RecyclerView.NO_POSITION) {
-                    listener.onTileFocused(pos, view, inDock);
+                    listener.onTileFocused(pos, view);
                 }
             });
         }
