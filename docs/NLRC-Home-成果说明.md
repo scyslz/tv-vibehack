@@ -349,3 +349,47 @@ Dock 行   ──↓──▶  应用行（展开，2 行）；──↑──�
 
 真机已验证：Dock 行 → 网格 → 行内左右 → 行尾换行到下一行 → 行首换行回上一行；Dock 行内左右不进入网格；
 高频 ↑/↓ 连按（压力测试）无崩溃、无黑闪。
+
+---
+
+## 12. 本轮追加（2026-10-22 夜，第三方应用清理）
+
+### 12.1 现状
+设备上用户安装（`pm list packages -3`）共 21 个，按用途/证据（装机时间、今日使用时长、组件与 SDK 特征）分类后清理了 7 个。
+
+### 12.2 已卸载（7 个，均为 `pm uninstall --user 0`）
+| 包名 | 是什么 | 备份 |
+|---|---|---|
+| `com.xtest` | 测试工具壳（`.main` + FileProvider） | 无（卸载前未备份，属纯垃圾） |
+| `com.yunxiang.tilldream` | 版本号 `v`，塞腾讯登录/网易云信推送/华为 HMS 推送/X5，从未启动 | 无 |
+| `com.tv.filemanager` | 当贝文件管理器（当贝 SDK + TalkingData + 推荐位），从未启动 | 无 |
+| `com.mitv.shoplugin` 9.9.9 | 电视淘宝购物插件（阿里百川） | `.backup/apks/com.mitv.shoplugin/base.apk` |
+| `com.mitv.kidai` 1.9.3 | AI 儿童/宝贝虎内购内容（ubestkid SDK + 支付） | `.backup/apks/com.mitv.kidai/base.apk` |
+| `com.sohuott.tv.vod.xiaomi` 6.8.2 | 搜狐视频 TV 预装（2019 装机、从未启动） | `.backup/apks/com.sohuott.tv.vod.xiaomi/base.apk` |
+| `com.lutongnet.nldmxXiaomiChildren` 4.01.06 | 儿童内容包（从未启动） | `.backup/apks/com.lutongnet.nldmxXiaomiChildren/base.apk` |
+
+### 12.3 备份与回装
+- 备份位置：仓库内 `.backup/`（**已加入 `.gitignore`**，合计约 95MB，不入库）
+  - `apks/<包名>/base.apk`：`adb pull /data/app/<包名>-N/base.apk` 直接拉取（本机 shell 不能 `ls /data/app`，但**能读文件**，所以 pull 可行）
+  - `meta/<包名>.txt`：`pm dump` 原文（版本/签名/权限/首次安装时间）
+  - `restore.md`：清单 + md5 + 回装命令
+- 回装：`adb -s 192.168.100.165:5555 install -r .backup/apks/<包名>/base.apk`
+- **已实测回装可用**：`com.mitv.kidai` 从备份 `install -r` → Success → 出现在包列表 → 再卸载，闭环通过。
+
+### 12.4 保留（14 个）
+- 日常在用：`com.gathin.tvhome`(桌面) `org.smarttube.stable` `com.amazon.firetv.youtube` `com.ktcp.video`(云视听极光) `com.cibn.tv`(酷喵) `com.tencent.karaoketv`(全民K歌) `com.netease.cloudmusic.tv` `com.live.zd`(小薇直播) `com.quark.yun.tv`(夸克网盘) `com.github.tvbox.osc.tk`(TVBox) `mark.via`(Via 浏览器)
+- 系统组件（别动）：`com.xm.webcontent`（小米 WebView 容器）、`com.mitv.codec.update`（解码库更新）
+- 已是停用状态：`com.mitv.care`（浮层+推送广告）
+
+### 12.5 这台 ROM 的限制（重要）
+`pm disable-user` / `pm disable` / `pm disable-until-used` / `pm hide` **全部被拒**：
+
+```
+Error: java.lang.SecurityException: Permission Denial:
+attempt to change component state from pid=…, uid=2000, package uid=…
+```
+
+即 shell 无权改**用户安装包**的启用状态；`adb root` 也不可用（production build）。
+所以本机做精简只有两条路：① `pm uninstall --user 0`（本 ROM 无 `pm install-existing`，只能靠备份/商店回装）；
+② 在电视「设置 → 应用」里手动停用（可逆）。
+另：之前文档里记录的那批 debloat 停用，当前只剩 `com.mitv.care` 生效，其余已被恢复。

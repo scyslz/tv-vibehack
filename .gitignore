@@ -18,3 +18,4 @@ personal_tv_setup/
 
 # local build artifacts / keystore (host-specific)
 .build/
+.backup/
