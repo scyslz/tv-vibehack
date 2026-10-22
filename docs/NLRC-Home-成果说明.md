@@ -393,3 +393,43 @@ attempt to change component state from pid=…, uid=2000, package uid=…
 所以本机做精简只有两条路：① `pm uninstall --user 0`（本 ROM 无 `pm install-existing`，只能靠备份/商店回装）；
 ② 在电视「设置 → 应用」里手动停用（可逆）。
 另：之前文档里记录的那批 debloat 停用，当前只剩 `com.mitv.care` 生效，其余已被恢复。
+
+---
+
+## 13. 本轮追加（2026-10-23 凌晨，Wi-Fi 状态即时刷新 + HDMI 3）
+
+### 13.1 Bug：开机后 Wi-Fi 已连上但胶囊一直显示 Offline
+原因：`updateWifiLabel()` 只在 `onResume` 和每分钟的 tick 里各读一次网络，**没有任何监听**。
+开机时 `BootReceiver` 先把桌面拉起来，那时 Wi-Fi 往往还没关联 → 第一次读到“无网络”就一直是 Offline（最长 60 秒）。
+
+改法（`MainActivity`）：
+- 广播监听：`CONNECTIVITY_ACTION`、`WifiManager.NETWORK_STATE_CHANGED_ACTION`、`WIFI_STATE_CHANGED_ACTION`、`Intent.ACTION_SCREEN_ON`
+- `ConnectivityManager.registerNetworkCallback`：`onAvailable / onLost / onCapabilitiesChanged`
+- 开机补偿：只要还是 Offline 就每 **1.2 秒**重试（最多 12 次 ≈ 14 秒），Wi-Fi 一关联立刻显示 SSID
+- `currentWifiLabel()` 三级兜底：`getActiveNetwork()+getNetworkCapabilities()` → `getActiveNetworkInfo()`（API 23 老接口）→ “Wi-Fi 已关联就直接用 SSID”
+- `currentSsid()` 处理 `"<unknown ssid>"`、`0x`、引号；已联网但读不到名字时显示 `Wi-Fi` 而不是 `Offline`
+- `onDestroy` 注销接收器与 callback
+
+验证：重启电视后，开机首次读到的就是 `Xiaomi_A9C9_5G`（不再 Offline）；蓝牙同步显示 `XFW-BT`。
+
+### 13.2 HDMI 3 进 Inputs 下拉
+原因：Inputs 下拉走小米自家 `MiTVTVPlayer/.ExternalSourceActivity`，靠 `input=<硬件源 id>` 切换；`config.xml` 里只写了
+`source_hdmi_1=2`、`source_hdmi_2=18`、`source_av=17`，**从来没有第三个口的 id**。
+（标准 `TvInputManager` 在这台 ROM 上只注册了 ATV / DTV / HDMI1 三个 input，HDMI2/3 没暴露，所以只能走小米的 id。）
+
+改法：把 HDMI 源改成**配置数组**，按口顺序排列，下拉与 Dock 固定都自动跟随：
+
+```xml
+<integer-array name="source_hdmi">
+    <item>2</item>    <!-- HDMI 1 -->
+    <item>18</item>   <!-- HDMI 2 -->
+    <item>19</item>   <!-- HDMI 3（待真机确认） -->
+</integer-array>
+```
+
+- `MainActivity.showInputs()` 用数组循环生成 `HDMI 1..N`（占位 key `hdmi_1..N`，可长按固定到 Dock）
+- `AppAdapter.reload()` 同样循环生成可固定的磁贴（HDMI 2 保留蓝色强调色）
+- `HdmiHelper.switchToHdmi2()`（Netflix/Prime 磁贴）改为读数组第 2 项
+- 以后加/减口只改这一个数组
+
+**待确认**：第三个口 `19` 是推测值（与 `18` 相邻）；若实际切不到 HDMI 3，把 `19` 换成 `16 / 20 / 21 / 3` 逐个试即可，改完重新 `./.build/build.sh` + `adb install -r`。

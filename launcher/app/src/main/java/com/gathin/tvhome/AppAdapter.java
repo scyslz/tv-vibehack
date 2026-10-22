@@ -149,18 +149,20 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         // Other Android TV boxes use the standard TvContract passthrough channels.
         boolean miPlayer = HdmiHelper.isMiPlayer(ctx);
         if (miPlayer) {
-            int hdmi1 = ctx.getResources().getInteger(R.integer.source_hdmi_1);
-            int hdmi2 = ctx.getResources().getInteger(R.integer.source_hdmi_2);
+            int[] hdmi = ctx.getResources().getIntArray(R.array.source_hdmi);
             int av = ctx.getResources().getInteger(R.integer.source_av);
 
-            fresh.add(new Entry("HDMI 1", "hdmi_1",
-                    createHdmiBanner(ctx, "HDMI 1", "Input", false, 0xFF141414, 0xFF222222),
-                    getDrawableSafe(ctx, R.drawable.ic_input),
-                    HdmiHelper.createMiSourceIntent(ctx, hdmi1), 0xFF555555));
-            fresh.add(new Entry("HDMI 2", "hdmi_2",
-                    createHdmiBanner(ctx, "HDMI 2", "Input", false, 0xFF0D1B2A, 0xFF1B263B),
-                    getDrawableSafe(ctx, R.drawable.ic_input),
-                    HdmiHelper.createMiSourceIntent(ctx, hdmi2), 0xFF0077EE));
+            for (int i = 0; i < hdmi.length; i++) {
+                String title = "HDMI " + (i + 1);
+                boolean blue = (i == 1);          // keep HDMI 2's blue accent
+                fresh.add(new Entry(title, "hdmi_" + (i + 1),
+                        createHdmiBanner(ctx, title, "Input", false,
+                                blue ? 0xFF0D1B2A : 0xFF141414,
+                                blue ? 0xFF1B263B : 0xFF222222),
+                        getDrawableSafe(ctx, R.drawable.ic_input),
+                        HdmiHelper.createMiSourceIntent(ctx, hdmi[i]),
+                        blue ? 0xFF0077EE : 0xFF555555));
+            }
             fresh.add(new Entry("AV Input", "av_input",
                     createHdmiBanner(ctx, "AV", "Composite", false, 0xFF141414, 0xFF222222),
                     getDrawableSafe(ctx, R.drawable.ic_av),

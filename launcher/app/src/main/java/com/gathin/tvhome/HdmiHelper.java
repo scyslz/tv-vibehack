@@ -90,7 +90,8 @@ public final class HdmiHelper {
                             "HDMI 2", Toast.LENGTH_SHORT).show();
                 }
                 if (isMiPlayer(context)) {
-                    int source = context.getResources().getInteger(R.integer.source_hdmi_2);
+                    int[] sources = context.getResources().getIntArray(R.array.source_hdmi);
+                    int source = sources.length > 1 ? sources[1] : sources[0];
                     context.startActivity(createMiSourceIntent(context, source));
                 } else {
                     context.startActivity(createHdmi2Intent());

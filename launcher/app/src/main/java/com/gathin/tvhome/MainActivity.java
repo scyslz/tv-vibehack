@@ -26,6 +26,8 @@ import android.media.tv.TvInputManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
+import android.net.NetworkRequest;
 import android.net.Uri;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
@@ -134,6 +136,23 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             updateBluetoothLabel();
         }
     };
+    /** Fires on every connectivity / Wi-Fi state change so the pill never shows a stale network. */
+    private final BroadcastReceiver wifiReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            updateWifiLabel();
+        }
+    };
+    private ConnectivityManager.NetworkCallback wifiCallback;
+    /** Boot can finish before Wi-Fi associates; poll a few times instead of waiting a whole minute. */
+    private int wifiRetries;
+    private final Runnable wifiRetry = new Runnable() {
+        @Override
+        public void run() {
+            updateWifiLabel();
+        }
+    };
+
     private final BluetoothProfile.ServiceListener btProfileListener = new BluetoothProfile.ServiceListener() {
         @Override
         public void onServiceConnected(int profile, BluetoothProfile proxy) {
@@ -240,6 +259,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
         btnBluetooth = findViewById(R.id.btnBluetooth);
         setupBluetooth();
+        setupWifiMonitor();
         View btnInputs = findViewById(R.id.btnInputs);
         View btnSettings = findViewById(R.id.btnSettings);
         btnInputs.setOnClickListener(v -> showInputs());
@@ -337,6 +357,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     protected void onDestroy() {
         try {
             unregisterReceiver(btReceiver);
+        } catch (Exception ignored) {
+        }
+        try {
+            unregisterReceiver(wifiReceiver);
+        } catch (Exception ignored) {
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null && wifiCallback != null) cm.unregisterNetworkCallback(wifiCallback);
         } catch (Exception ignored) {
         }
         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
@@ -965,29 +994,111 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         Wallpapers.apply(this, wallpaper, animate);
     }
 
-    /** Shows the Wi-Fi network name on the button when we can read it, otherwise the connection type. */
+    /**
+     * Shows the Wi-Fi network name on the pill, or the connection type when there is no name.
+     *
+     * <p>Reading the network once is not enough on this TV: the launcher is started by the boot
+     * broadcast before Wi-Fi has associated, so the very first read returns "offline" and nothing
+     * refreshed it for up to a minute. Every connectivity change now updates the pill, and while it
+     * is still offline a few short retries run so the SSID appears within a second of associating.
+     */
     private void updateWifiLabel() {
-        String text = getString(R.string.wifi);
+        if (btnWifi == null) return;
+        String text = currentWifiLabel();
+        btnWifi.setText(text);
+
+        boolean offline = text.equals(getString(R.string.offline));
+        handler.removeCallbacks(wifiRetry);
+        if (offline && wifiRetries < 12) {
+            wifiRetries++;
+            handler.postDelayed(wifiRetry, 1200);
+        } else if (!offline) {
+            wifiRetries = 0;
+        }
+    }
+
+    private String currentWifiLabel() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             Network net = cm != null ? cm.getActiveNetwork() : null;
             NetworkCapabilities caps = net != null ? cm.getNetworkCapabilities(net) : null;
-            if (caps == null) {
-                text = getString(R.string.offline);
-            } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
-                text = getString(R.string.ethernet);
-            } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-                WifiInfo info = wm != null ? wm.getConnectionInfo() : null;
-                String ssid = info != null ? info.getSSID() : null;
-                if (ssid != null) {
-                    ssid = ssid.replace("\"", "").trim();
-                    if (!ssid.isEmpty() && !ssid.contains("unknown") && !ssid.equals("0x")) text = ssid;
+            if (caps != null) {
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                    return getString(R.string.ethernet);
                 }
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    String ssid = currentSsid();
+                    return ssid != null ? ssid : getString(R.string.wifi);
+                }
+                return getString(R.string.wifi);   // VPN or another transport: still online
+            }
+            // Some firmwares leave getActiveNetwork() empty right after boot; ask the legacy API.
+            NetworkInfo info = cm != null ? cm.getActiveNetworkInfo() : null;
+            if (info != null && info.isConnected()) {
+                if (info.getType() == ConnectivityManager.TYPE_ETHERNET) return getString(R.string.ethernet);
+                String ssid = currentSsid();
+                return ssid != null ? ssid : getString(R.string.wifi);
+            }
+            // Last resort: the Wi-Fi link can be associated before ConnectivityManager catches up.
+            String ssid = currentSsid();
+            if (ssid != null) return ssid;
+        } catch (Exception ignored) {
+        }
+        return getString(R.string.offline);
+    }
+
+    /** SSID of the current Wi-Fi link, or null when there is none / it cannot be read. */
+    private String currentSsid() {
+        try {
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm == null || !wm.isWifiEnabled()) return null;
+            WifiInfo info = wm.getConnectionInfo();
+            if (info == null) return null;
+            String ssid = info.getSSID();
+            if (ssid == null) return null;
+            ssid = ssid.replace("\"", "").trim();
+            if (ssid.isEmpty() || ssid.toLowerCase().contains("unknown") || ssid.equals("0x")) return null;
+            return ssid;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Connectivity + Wi-Fi state listeners; a single missed broadcast used to leave "offline" stuck. */
+    private void setupWifiMonitor() {
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(ConnectivityManager.CONNECTIVITY_ACTION);
+        filter.addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION);
+        filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        try {
+            registerReceiver(wifiReceiver, filter);
+        } catch (Exception ignored) {
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                wifiCallback = new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(Network network) {
+                        updateWifiLabel();
+                    }
+
+                    @Override
+                    public void onLost(Network network) {
+                        updateWifiLabel();
+                    }
+
+                    @Override
+                    public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                        updateWifiLabel();
+                    }
+                };
+                cm.registerNetworkCallback(new NetworkRequest.Builder().build(), wifiCallback);
             }
         } catch (Exception ignored) {
         }
-        btnWifi.setText(text);
+        updateWifiLabel();
     }
 
     /** Dark glyphs on the warm focus pill, white glyphs on the translucent one. */
@@ -1182,13 +1293,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
         boolean sawNonHdmi = false;
         if (HdmiHelper.isMiPlayer(this)) {
-            // Every source is always listed here, whether or not it also has a dock tile.
-            addInputRow(rows, popup, R.drawable.ic_input, "HDMI 1", -1, "hdmi_1",
-                    () -> open(HdmiHelper.createMiSourceIntent(this,
-                            getResources().getInteger(R.integer.source_hdmi_1))));
-            addInputRow(rows, popup, R.drawable.ic_input, "HDMI 2", -1, "hdmi_2",
-                    () -> open(HdmiHelper.createMiSourceIntent(this,
-                            getResources().getInteger(R.integer.source_hdmi_2))));
+            // Every configured source is always listed here, whether or not it has a dock tile.
+            int[] hdmi = getResources().getIntArray(R.array.source_hdmi);
+            for (int i = 0; i < hdmi.length; i++) {
+                final int source = hdmi[i];
+                final String label = "HDMI " + (i + 1);
+                addInputRow(rows, popup, R.drawable.ic_input, label, -1, "hdmi_" + (i + 1),
+                        () -> open(HdmiHelper.createMiSourceIntent(this, source)));
+            }
             addSeparator(rows);
             addInputRow(rows, popup, R.drawable.ic_av, "AV Input", -1, "av_input",
                     () -> open(HdmiHelper.createMiSourceIntent(this,
