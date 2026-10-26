@@ -109,6 +109,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private float glassTargetX, glassTargetY;
     private boolean glassShown;
     private int lastFocused = 0;
+    /** Entrance animation runs on the first resume only (and when the app list changes). */
+    private boolean firstResume = true;
     /** Tile that owns the glass highlight, so it can follow the row when the window resizes. */
     private View focusedCard;
     /** Set when the rows were moved without a scroll event; the glass is re-glued before drawing. */
@@ -222,8 +224,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         grid.setLayoutManager(new GridLayoutManager(this, COLUMNS));
         grid.setHasFixedSize(true);
         grid.setItemAnimator(null);
-        grid.setLayoutAnimation(new LayoutAnimationController(
-                AnimationUtils.loadAnimation(this, R.anim.tile_enter), 0.06f));
         dockDeco = new DockDecoration(density);
         grid.addItemDecoration(dockDeco);
         adapter = new AppAdapter(this, this);
@@ -326,9 +326,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         heroShown = false;
         heroName.setAlpha(0f);
         ambient.setAlpha(0f);
-        adapter.reload();
+        boolean tilesChanged = adapter.reload();
         resetWindow();
-        grid.scheduleLayoutAnimation();
+        // A resume that finds the same tiles must not replay the entrance: after boot (and every
+        // time the user comes back from an app) the whole grid used to fade back in, which reads as
+        // "the home screen reloaded itself".
+        if (firstResume || tilesChanged) playTileEntrance();
+        firstResume = false;
         updateGreeting();
         updateFatherGreeting();
         updateFestivalGreeting();
@@ -516,6 +520,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             grid.scrollToPosition(0);
             glassDirty = true;
         }
+    }
+
+    /**
+     * Fades the tiles in once. The controller is dropped again after the animation so a later
+     * layout (window resize, scroll, dock toggle) can never replay the entrance.
+     */
+    private void playTileEntrance() {
+        grid.setLayoutAnimation(new LayoutAnimationController(
+                AnimationUtils.loadAnimation(this, R.anim.tile_enter), 0.06f));
+        grid.scheduleLayoutAnimation();
+        grid.postDelayed(() -> grid.setLayoutAnimation(null), 1500);
     }
 
     /** Puts the screen back in its resting state (one row = the dock, or two when no dock yet). */

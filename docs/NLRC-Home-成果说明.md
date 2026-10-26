@@ -432,4 +432,92 @@ attempt to change component state from pid=…, uid=2000, package uid=…
 - `HdmiHelper.switchToHdmi2()`（Netflix/Prime 磁贴）改为读数组第 2 项
 - 以后加/减口只改这一个数组
 
-**待确认**：第三个口 `19` 是推测值（与 `18` 相邻）；若实际切不到 HDMI 3，把 `19` 换成 `16 / 20 / 21 / 3` 逐个试即可，改完重新 `./.build/build.sh` + `adb install -r`。
+**待确认**：第三个口 `19` 是推测值（与 `18` 相邻）。→ 见 **§14.1**：用 `tools/probe_hdmi.sh` 逐个试候选 id，
+不用每次重编译；确认后只改数组第 3 项。
+
+---
+
+## 14. 本轮追加（2026-10-26：HDMI 3 逐个实测 + 开机不重画）
+
+### 14.1 HDMI 3 的 id：改成「一个一个试」，不用每次重编译
+
+`19` 只是按「`17`=AV、`18`=HDMI 2」推出来的邻居值，没在真机上验证过。与其每改一次 id 就
+`./.build/build.sh` + `adb install -r` 一轮，不如直接用 adb 把 `ExternalSourceActivity` 一个个拉起来：
+你在电视上看着画面，对了按 `y`，脚本把 id 写进 `config.xml`。
+
+```bash
+tools/probe_hdmi.sh            # 交互式逐个试（默认候选表）
+tools/probe_hdmi.sh --ids 20 21 16
+tools/probe_hdmi.sh --sweep    # 0..40 全扫，每个 id 存一张截图到 .build/hdmi-probe/
+tools/probe_hdmi.sh --dump     # 抓现场：dumpsys tv_input / tvplayer 包路径 / 当前前台
+tools/probe_hdmi.sh --watch    # 直播 tvplayer 日志，用原遥控器自己切到 HDMI 3，抓真实 id
+```
+
+单条命令等价形式（脚本内部就是它）：
+
+```bash
+adb -s 192.168.100.165:5555 shell \
+  "am start -n com.xiaomi.mitv.tvplayer/com.xiaomi.mitv.tvplayer.ExternalSourceActivity \
+            --ei input 19 --ez no_launch_panel true"
+```
+
+候选表的顺序和理由：
+
+| 顺序 | id | 理由 |
+|---|---|---|
+| 1 | 19 | 紧挨 `18`（HDMI 2），当前配置里的推测值 |
+| 2 | 20 / 21 | `18` 往后再排两个，若是「口号连续」的枚举 |
+| 3 | 16 / 15 / 14 | `17`（AV）左边，若枚举顺序是 AV、HDMI 2、HDMI 3… |
+| 4 | 3 / 4 / 5 / 6 | `2`（HDMI 1）右边的小号段 |
+| 5 | 22 / 23 / 24 | 大号段扩散 |
+| 6 | 1 / 0 | ATV / TV，用来确认「这套 id 机制还活着」而不是整条路都不通 |
+
+脚本会自动把 `tvplayer` 自己的 logcat（`hdmi|source|InputSource|ExternalSource`）存到
+`.build/hdmi-probe/log.txt`，所以即使你看不出画面差别，日志里通常也能看到它切到了哪个口。
+
+拿到 id 后只改一处（`res/values/config.xml`，脚本会问要不要自动改）：
+
+```xml
+<integer-array name="source_hdmi">
+    <item>2</item>     <!-- HDMI 1，已验证 -->
+    <item>18</item>    <!-- HDMI 2，已验证 -->
+    <item>20</item>    <!-- HDMI 3，实测确认 -->
+</integer-array>
+```
+
+> 注意：`tools/probe_hdmi.sh` 用的是 `am start`，不受 launcher 的配置影响，所以**不用装新 APK**就能试完整个候选表；
+> 只有确定 id 之后才需要重编译一次，把数组第 3 项换掉。
+
+### 14.2 Bug：开机后桌面「先后被重画一次」
+
+现象：开机时先看到桌面（磁贴淡入 + 壁纸），接着整屏又重来一遍，像 home 被重新加载。
+
+三个叠加的原因，逐个修掉：
+
+1. **direct-boot 进程被销毁后重建**（主因）
+   `MainActivity` 原来是 `android:directBootAware="true"`，`BootReceiver` 又监听 `LOCKED_BOOT_COMPLETED`。
+   于是系统在 user 0 还锁着的时候就画了一次桌面；一旦解锁，系统会销毁 direct-boot 进程，再用普通进程
+   重建一次 Activity —— 磁贴入场动画、壁纸、胶囊全部重来。
+   - `AndroidManifest.xml`：`MainActivity` 改成 `directBootAware="false"`（`BootReceiver` / `HomeKeyService`
+     仍保持 true，这样锁屏态的自愈逻辑还在）
+   - `BootReceiver.onReceive()`：先 `UserManager.isUserUnlocked()`，锁着就**只自愈无障碍、不拉 Activity**，
+     把启动留给解锁后的 `BOOT_COMPLETED`；拉 Activity 的逻辑抽成 `launchHome()`
+
+2. **每次 onResume 都重放磁贴入场动画**
+   `onResume()` 无条件 `adapter.reload()` + `grid.scheduleLayoutAnimation()`，所以从任何 App 回到桌面、
+   甚至只是窗口焦点变化，整个网格都会再淡入一次。
+   - `AppAdapter.reload()` 现在返回「磁贴是否真的变了」（按 key 比对，不看 label）
+   - `MainActivity` 只在**首次 resume 或磁贴真的变了**时才 `playTileEntrance()`，并在 1.5 秒后清掉
+     `LayoutAnimationController`，避免之后的 layout（拖 Dock、窗口伸缩、滚动）再触发一次
+
+3. **开机时壁纸被网络图顶掉**
+   开机瞬间 Wi-Fi 还没关联，先显示内置图；Bing 列表 1~3 秒后到达，立刻交叉淡入网络图 → 看起来就像整屏刷新。
+   - `Wallpapers`：进程首次上墙时间 `firstPaintAt` + `STARTUP_SETTLE_MS = 25s`，这 25 秒内
+     **内置图不会被网络图替换**；到下一个 3 分钟槽位再正常轮换淡入
+
+验证要点（重启后观察）：
+- 桌面只淡入**一次**，之后不再整屏重来
+- `adb -s 192.168.100.165:5555 logcat -d | grep BootReceiver` 应只有一条
+  `Received boot/power broadcast: android.intent.action.BOOT_COMPLETED`，且**没有**
+  `LOCKED_BOOT_COMPLETED` 之后的启动记录
+- 壁纸在开机 25 秒内保持内置图，之后（分钟 tick）才换成 Bing 图

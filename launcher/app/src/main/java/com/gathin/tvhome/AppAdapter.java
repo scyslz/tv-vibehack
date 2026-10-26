@@ -124,8 +124,16 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         MAX_DOCK       = Math.min(4, columns);
     }
 
-    /** Rebuilds the tile list from the package manager. */
-    void reload() {
+    /** Keys of what the list shows last time, so a no-op reload can be detected. */
+    private String lastSignature;
+
+    /**
+     * Rebuilds the tile list from the package manager.
+     *
+     * @return true when the visible tiles changed (installed / removed / pinned app), so the caller
+     *         can skip re-running the entrance animation on an unchanged list.
+     */
+    boolean reload() {
         PackageManager pm = ctx.getPackageManager();
         Intent probe = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
         List<ResolveInfo> found = pm.queryIntentActivities(probe, 0);
@@ -264,6 +272,18 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         // RecyclerView whose content is exactly as tall as its own viewport reports
         // canScrollVertically(false): with nothing to page into, the rows could never slide.
         for (int i = 0; i < columns * 2; i++) items.add(null);
+
+        String signature = signature();
+        boolean changed = !signature.equals(lastSignature);
+        lastSignature = signature;
+        return changed;
+    }
+
+    /** Identity of the visible tiles: which apps, in which order (labels are not part of it). */
+    private String signature() {
+        StringBuilder sb = new StringBuilder(items.size() * 16);
+        for (Entry e : items) sb.append(e == null ? "-" : e.pkg).append('\n');
+        return sb.toString();
     }
 
     /** Positions 0 .. realCount()-1 hold real tiles; the tail is the empty page-down room. */

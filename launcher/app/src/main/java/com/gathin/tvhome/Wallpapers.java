@@ -59,6 +59,17 @@ final class Wallpapers {
     /** How long the Bing image list stays valid before it is fetched again. */
     private static final long NET_LIST_TTL = 30 * 60 * 1000L;
 
+    /**
+     * After boot the bundled photo is on screen before Wi-Fi has even associated; the Bing list
+     * arrives a couple of seconds later. Swapping it right then makes the whole home screen look
+     * like it reloads itself, so the first network photo only takes over once this window passed
+     * (the regular 3-minute slot change then crossfades it as usual).
+     */
+    private static final long STARTUP_SETTLE_MS = 25_000L;
+
+    /** When this process painted its first wallpaper. */
+    private static long firstPaintAt;
+
     /** Network photos kept in memory. Old ones are dropped (not recycled) so the view never dies. */
     private static final int NET_CACHE_MAX = 3;
 
@@ -145,6 +156,13 @@ final class Wallpapers {
 
     private static boolean show(ImageView view, Bitmap bitmap, String key, boolean animate) {
         if (key.equals(currentKey) && view.getDrawable() != null) return false;
+        if (firstPaintAt == 0) firstPaintAt = System.currentTimeMillis();
+        // Keep the bundled fallback on screen for the first seconds after boot instead of
+        // crossfading a network photo in on top of it.
+        if (key.startsWith("net:") && currentKey != null && currentKey.startsWith("asset:")
+                && System.currentTimeMillis() - firstPaintAt < STARTUP_SETTLE_MS) {
+            return false;
+        }
         currentKey = key;
         view.setImageBitmap(bitmap);
         if (animate) {

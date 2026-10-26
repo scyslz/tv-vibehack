@@ -129,7 +129,7 @@ adb shell settings put secure accessibility_enabled 1
 | [`launcher/.../PenDriveActivity.java`](launcher/app/src/main/java/com/gathin/tvhome/PenDriveActivity.java) | Media viewer card UI for offline TV storage / USB playback. |
 | [`launcher/.../VideoPlayerActivity.java`](launcher/app/src/main/java/com/gathin/tvhome/VideoPlayerActivity.java) | Hardware-accelerated full-screen player with remote seek HUD and episode switching. |
 | [`examples/acer-v-pro-32-qled/`](examples/acer-v-pro-32-qled/) | Comprehensive teardown and architecture notes for Acer / MOKA Realtek RTD QLED TVs. |
-| [`tools/`](tools/) | Helper scripts: `safe_switch.bat` / `safe_switch.sh` for one-click toggle between stock and custom launcher. |
+| [`tools/`](tools/) | Helper scripts: `safe_switch.bat` / `safe_switch.sh` for one-click toggle between stock and custom launcher, `probe_hdmi.sh` for finding a TV's HDMI source ids one by one over adb. |
 
 ---
 
