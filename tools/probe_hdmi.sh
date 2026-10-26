@@ -2,7 +2,9 @@
 # 逐个试 MiTVTVPlayer 的硬件源 id，找出 HDMI 3 真正对应的那个。
 #
 # 原理：小米电视的输入源切换走 com.xiaomi.mitv.tvplayer/.ExternalSourceActivity，
-# 参数是整型 extra "input"。已知：2 = HDMI 1，18 = HDMI 2，17 = AV。
+# 参数是整型 extra "input"。实测（小米电视 4A / xmen / Amlogic，2026-10-26）：
+# 只有 25 能切（对应系统唯一注册的 HDMI 直通输入 Hdmi1InputService/HW5），
+# 2 / 17 / 18 / 19 / 23 / 24 全部报 "can not get input source"。不同机型 id 不同，照试。
 # 这个脚本不需要重新编译 APK、不需要装新版本 —— 直接用 adb 把 Activity 拉起来，
 # 你在电视上看着画面，对了按 y，脚本就把 id 记下来。
 #
@@ -11,6 +13,7 @@
 #   tools/probe_hdmi.sh --sweep         # 0..40 全扫一遍（每个都截图，事后自己看）
 #   tools/probe_hdmi.sh --dump          # 只抓现场信息（TvInput 列表 / 包路径 / 已注册输入）
 #   tools/probe_hdmi.sh --watch         # 直播 tvplayer 日志：用原遥控器自己切到 HDMI 3，抓真实 id
+#   tools/probe_hdmi.sh --check         # 把 config.xml 里现在配的每个 id 都试一遍，只输出 OK/fail
 #
 # 结果写在 .build/hdmi-probe/：每个 id 一张截图 + log.txt（tvplayer 自己打的日志）。
 set -uo pipefail
@@ -22,12 +25,9 @@ HOME_PKG="com.gathin.tvhome"
 OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/.build/hdmi-probe"
 
 # 推荐顺序，理由见 --help / 文档 §14：
-#   19 20 21  ...紧挨着 18（17=AV、18=HDMI2，19 最像 HDMI3）
-#   16 15 14  ...AV(17) 左边
-#   3 4 5 6   ...HDMI1(2) 右边的小号段
-#   22 23 24  ...18 往后再留几个
-#   0 1       ...TV/ATV，用来确认这套机制还活着
-DEFAULT_IDS="19 20 21 16 3 4 5 6 22 23 24 15 1 0"
+#   25 24 23  ...实测 25 = 这台机器的 HDMI 源（可能连号：24/23 是另外两个口）
+#   26 22 19 18 17 20 21 16 3 2 1 0  ...扩散，确认其它端口/id 是否存在
+DEFAULT_IDS="25 24 23 26 22 19 18 17 20 21 16 3 2 1 0"
 
 A=()
 say() { printf '%s\n' "$*"; }
@@ -41,6 +41,7 @@ while [ $# -gt 0 ]; do
         -h|--help) usage ;;
         --dump)  MODE=dump ;;
         --watch) MODE=watch ;;
+        --check) MODE=check ;;
         --sweep) MODE=sweep; IDS=""; for i in $(seq 0 40); do IDS="$IDS $i"; done ;;
         --ids)   shift; IDS="$*"; break ;;
         *) say "未知参数：$1"; usage ;;
@@ -76,6 +77,41 @@ dump_info() {
         adb -s "$DEV" shell dumpsys activity activities 2>/dev/null | grep -iE "mFocusedActivity|mResumedActivity" | head -5
     } | tee -a "$LOG"
 }
+
+if [ "$MODE" = check ]; then
+    CFG="$(cd "$(dirname "$0")/.." && pwd)/launcher/app/src/main/res/values/config.xml"
+    IDS=$(python3 -c '
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"<integer-array name=\"source_hdmi\">(.*?)</integer-array>", src, re.S)
+print(" ".join(i.strip() for i in re.findall(r"<item>(.*?)</item>", m.group(1))))
+' "$CFG")
+    say "config.xml 里的 HDMI id：$IDS"
+    say "判定标准：日志里出现 createSessionInternalLocked 才算真的切到了；"
+    say "          can not get input source = 这个 id 在这台 ROM 上不存在。"
+    say ""
+    printf '%-6s %-8s %s\n' "id" "结果" "证据"
+    for id in $IDS; do
+        adb -s "$DEV" shell am force-stop "$PKG" >/dev/null 2>&1
+        adb -s "$DEV" logcat -c 2>/dev/null
+        adb -s "$DEV" shell "am start -a com.xiaomi.mitv.tvplayer.EXTSRC_PLAY -n $ACT --ei input $id --ez no_launch_panel true" >/dev/null 2>&1
+        sleep 3
+        LOGF="$OUT_DIR/check_${id}.txt"
+        adb -s "$DEV" logcat -d 2>/dev/null | strings > "$LOGF"
+        SESS=$(grep -m1 createSessionInternalLocked "$LOGF" | sed 's/.*inputId=//;s/)$//')
+        if [ -n "$SESS" ]; then
+            VIDEO=$(grep -c onVideoAvailable "$LOGF")
+            printf '%-6s %-8s %s (video events: %s)\n' "$id" "OK" "$SESS" "$VIDEO"
+        elif grep -q "can not get input source" "$LOGF"; then
+            printf '%-6s %-8s %s\n' "$id" "fail" "can not get input source (框架里没有这个源)"
+        else
+            printf '%-6s %-8s %s\n' "$id" "?" "no session, no error - see $LOGF"
+        fi
+    done
+    say ""
+    say "提示：只有真的插了设备的口才能确认 id 对不对；没插设备的口，框架可能压根不注册。"
+    exit 0
+fi
 
 if [ "$MODE" = watch ]; then
     say "现在用电视原配遥控器（或小米原版「输入源」面板）切到 HDMI 3，日志里冒出来的 id 就是答案。"

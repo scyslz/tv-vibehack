@@ -32,14 +32,34 @@
     <string name="live_tv_package" translatable="false">com.xiaomi.mitv.tvplayer</string>
 
     <!-- Hardware source ids for TVs that expose TV inputs through Xiaomi's MiTVTVPlayer
-         (Amlogic Mi TV / Redmi TV). Values come from MiTVTVPlayer's ExternalSourceActivity.
-         The array is in port order: entry 0 is HDMI 1, entry 1 is HDMI 2 and so on, so adding a
-         port here adds it to the Inputs menu and to the dock's pinnable tiles. -->
+         (Amlogic Mi TV / Redmi TV). Values come from MiTVTVPlayer's ExternalSourceActivity;
+         the two arrays are parallel and in menu order (index 0 = first row in the Inputs menu).
+
+         Measured on this Mi TV 4A (xmen / Amlogic, platformid 659), 2026-10-26 - see docs §15:
+           * HDMI 3 = 25  -> VERIFIED. The stock settings switch to HDMI 3 sends
+                             com.xiaomi.mitv.tvplayer.EXTSRC_PLAY with input=25, and 25 is the only
+                             id that creates a session (Hdmi1InputService/HW5, the single HDMI
+                             passthrough this ROM registers).
+           * HDMI 2 = 24  -> from /system/etc/mitv.config.xml (hdmi2_order). NOT verified yet: no
+                             device is plugged into HDMI 2, so the framework answers
+                             "can not get input source" and nothing switches.
+           * HDMI 1 = 23  -> same as above (hdmi3_order in mitv.config.xml, the internal numbering
+                             runs opposite to the labels on the back panel).
+         The old guesses 2 / 18 / 19 do not exist on this ROM - they only ever opened the player
+         without switching anything.
+
+         Plug a device into a port and run tools/probe_hdmi.sh to confirm its id; then fix the
+         number here (one id + one label per port, same position in both arrays). -->
     <integer-array name="source_hdmi">
-        <item>2</item>
-        <item>18</item>
-        <item>19</item>
+        <item>23</item>
+        <item>24</item>
+        <item>25</item>
     </integer-array>
+    <string-array name="hdmi_labels">
+        <item>HDMI 1</item>
+        <item>HDMI 2</item>
+        <item>HDMI 3</item>
+    </string-array>
     <integer name="source_av">17</integer>
 
     <!-- Tiles per row in the grid; the dock always has this many slots. -->

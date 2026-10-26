@@ -157,12 +157,13 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         // Other Android TV boxes use the standard TvContract passthrough channels.
         boolean miPlayer = HdmiHelper.isMiPlayer(ctx);
         if (miPlayer) {
-            int[] hdmi = ctx.getResources().getIntArray(R.array.source_hdmi);
+            int[] hdmi = HdmiHelper.hdmiSources(ctx);
+            String[] hdmiNames = HdmiHelper.hdmiLabels(ctx);
             int av = ctx.getResources().getInteger(R.integer.source_av);
 
             for (int i = 0; i < hdmi.length; i++) {
-                String title = "HDMI " + (i + 1);
-                boolean blue = (i == 1);          // keep HDMI 2's blue accent
+                String title = hdmiNames[i];
+                boolean blue = (i == 0);          // the primary port keeps the blue accent
                 fresh.add(new Entry(title, "hdmi_" + (i + 1),
                         createHdmiBanner(ctx, title, "Input", false,
                                 blue ? 0xFF0D1B2A : 0xFF141414,

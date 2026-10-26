@@ -15,8 +15,12 @@ import android.widget.Toast;
  *
  * Two hardware families are supported:
  *  - Xiaomi Mi TV / Redmi TV (Amlogic): MiTVTVPlayer's ExternalSourceActivity takes the
- *    hardware source id as an "input" int extra. The ids below are the ones this
- *    firmware uses (2 = HDMI 1, 17 = AV, 18 = HDMI 2).
+ *    hardware source id as an "input" int extra. The ids are per firmware and live in
+ *    res/values/config.xml (source_hdmi + hdmi_labels); nothing is hard-coded here.
+ *    Measured on a Mi TV 4A (xmen / Amlogic): the framework registers a single HDMI
+ *    passthrough input (com.droidlogic.tvinput/.services.Hdmi1InputService/HW5) and
+ *    MiTVTVPlayer calls it source id 25 - the same id the stock settings use. The
+ *    previously assumed 2 / 18 / 19 do not exist on this ROM.
  *  - Android TV / Google TV (Realtek etc.): standard TvContract passthrough channel URI.
  */
 public final class HdmiHelper {
@@ -42,6 +46,32 @@ public final class HdmiHelper {
         } catch (PackageManager.NameNotFoundException e) {
             return false;
         }
+    }
+
+    /** Configured HDMI source ids, in menu order (res/values/config.xml, source_hdmi). */
+    public static int[] hdmiSources(Context ctx) {
+        int[] ids = ctx.getResources().getIntArray(R.array.source_hdmi);
+        return ids == null ? new int[0] : ids;
+    }
+
+    /**
+     * Labels for {@link #hdmiSources}, index for index (res/values/config.xml, hdmi_labels).
+     * Missing labels fall back to "HDMI 1", "HDMI 2" ... so a config that only lists ids still works.
+     */
+    public static String[] hdmiLabels(Context ctx) {
+        int[] ids = hdmiSources(ctx);
+        String[] labels = new String[ids.length];
+        String[] configured;
+        try {
+            configured = ctx.getResources().getStringArray(R.array.hdmi_labels);
+        } catch (Exception e) {
+            configured = new String[0];
+        }
+        for (int i = 0; i < ids.length; i++) {
+            String label = configured != null && i < configured.length ? configured[i] : null;
+            labels[i] = label == null || label.trim().isEmpty() ? "HDMI " + (i + 1) : label.trim();
+        }
+        return labels;
     }
 
     /** Explicit intent that tunes the Xiaomi TV player to a hardware source id. */
@@ -74,8 +104,11 @@ public final class HdmiHelper {
         return intent;
     }
 
-    /** Switches to HDMI 2 immediately with debouncing and an optional toast. */
-    public static synchronized void switchToHdmi2(Context context, boolean showToast) {
+    /**
+     * Switches to the HDMI entry at {@code index} of the configured list, with debouncing and an
+     * optional toast. Index 1 (the second port) is used when it exists, else the first.
+     */
+    public static synchronized void switchToHdmi(Context context, int index, boolean showToast) {
         long now = System.currentTimeMillis();
         // Debounce multiple rapid button presses within 500ms
         if (now - sLastSwitchTime < 500) {
@@ -83,27 +116,34 @@ public final class HdmiHelper {
         }
         sLastSwitchTime = now;
 
+        final int[] sources = hdmiSources(context);
+        if (sources.length == 0) return;
+        final int slot = Math.max(0, Math.min(index, sources.length - 1));
+        final String label = hdmiLabels(context)[slot];
+
         MAIN_HANDLER.post(() -> {
             try {
                 if (showToast) {
-                    Toast.makeText(context.getApplicationContext(),
-                            "HDMI 2", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(context.getApplicationContext(), label, Toast.LENGTH_SHORT).show();
                 }
                 if (isMiPlayer(context)) {
-                    int[] sources = context.getResources().getIntArray(R.array.source_hdmi);
-                    int source = sources.length > 1 ? sources[1] : sources[0];
-                    context.startActivity(createMiSourceIntent(context, source));
+                    context.startActivity(createMiSourceIntent(context, sources[slot]));
                 } else {
                     context.startActivity(createHdmi2Intent());
                 }
-                Log.i(TAG, "Switched to HDMI 2");
+                Log.i(TAG, "Switched to " + label + " (source id " + sources[slot] + ")");
             } catch (Exception e) {
-                Log.e(TAG, "Failed to switch to HDMI 2", e);
+                Log.e(TAG, "Failed to switch to " + label, e);
                 try {
                     Toast.makeText(context.getApplicationContext(),
-                            "Cannot open HDMI 2", Toast.LENGTH_SHORT).show();
+                            "Cannot open " + label, Toast.LENGTH_SHORT).show();
                 } catch (Exception ignored) {}
             }
         });
+    }
+
+    /** Convenience for the remote hotkeys: the second configured port, else the first. */
+    public static void switchToHdmi2(Context context, boolean showToast) {
+        switchToHdmi(context, hdmiSources(context).length > 1 ? 1 : 0, showToast);
     }
 }

@@ -1309,10 +1309,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         boolean sawNonHdmi = false;
         if (HdmiHelper.isMiPlayer(this)) {
             // Every configured source is always listed here, whether or not it has a dock tile.
-            int[] hdmi = getResources().getIntArray(R.array.source_hdmi);
+            int[] hdmi = HdmiHelper.hdmiSources(this);
+            String[] hdmiNames = HdmiHelper.hdmiLabels(this);
             for (int i = 0; i < hdmi.length; i++) {
                 final int source = hdmi[i];
-                final String label = "HDMI " + (i + 1);
+                final String label = hdmiNames[i];
                 addInputRow(rows, popup, R.drawable.ic_input, label, -1, "hdmi_" + (i + 1),
                         () -> open(HdmiHelper.createMiSourceIntent(this, source)));
             }

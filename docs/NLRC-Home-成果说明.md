@@ -521,3 +521,72 @@ adb -s 192.168.100.165:5555 shell \
   `Received boot/power broadcast: android.intent.action.BOOT_COMPLETED`，且**没有**
   `LOCKED_BOOT_COMPLETED` 之后的启动记录
 - 壁纸在开机 25 秒内保持内置图，之后（分钟 tick）才换成 Bing 图
+
+---
+
+## 15. 真机实测：HDMI 3 的 source id 是 **25**（2026-10-26，电视在线）
+
+### 15.1 现场证据
+
+| 观察 | 结果 |
+|---|---|
+| `dumpsys tv_input` 里注册的输入 | 只有 3 个：`ATVInputService/HW0`、`DTVInputService/HW10`、**`Hdmi1InputService/HW5`** |
+| `Hdmi2InputService` / `Hdmi3InputService` | 服务被 bind，但**没有注册成 TvInput**（框架里不存在） |
+| `am start ... --ei input 2 / 17 / 18 / 19 / 23 / 24 / 26` | 全部 `MiTv-SourceManagerImpl: can not get input source, setCurrentSource fail` → 什么都不会切 |
+| `am start ... --ei input 25` | `createSessionInternalLocked(inputId=...Hdmi1InputService/HW5)` → **出画面** |
+| 你自己在「系统设置」里切到 HDMI 3 时系统发的 intent | `{act=com.xiaomi.mitv.tvplayer.EXTSRC_PLAY cmp=.ExternalSourceActivity (has extras)} from uid 1000`，落地 `setCurrentSource source=25` |
+
+结论：**这台机器（小米电视 4A / `xmen` / Amlogic，platformid 659）上，HDMI 3 那个口对应的就是 `input=25`**，
+而 `2`（HDMI 1）、`18`（HDMI 2）、`19`（之前猜的 HDMI 3）在这台 ROM 上都不存在——所以 Inputs 里的 HDMI 3 一直切不动。
+
+原因：`/system/etc/mitv.config.xml` 里这张板子的 `source_ports_list=source_list`，
+`hdmi1_order=25 / hdmi2_order=24 / hdmi3_order=23` 是「mitv 内部源号」，
+但框架只把其中一个（HW5 ↔ 25）注册成可直通输入；24 / 23 没有对应 TvInput，`setCurrentSource` 必然失败。
+（也解释了为什么 `2 / 18` 这两条「已验证」的记录其实是误判：那时只看到小米播放器被拉起来，并没有真的切源。）
+
+### 15.2 改法：id + 标签都进配置，三个口都在
+
+`res/values/config.xml` 是两个平行数组，顺序即菜单顺序（Inputs 下拉、Dock 可固定磁贴、热键都跟着走）：
+
+```xml
+<integer-array name="source_hdmi">
+    <item>23</item>   <!-- HDMI 1，未验证 -->
+    <item>24</item>   <!-- HDMI 2，未验证 -->
+    <item>25</item>   <!-- HDMI 3，已实测 -->
+</integer-array>
+<string-array name="hdmi_labels">
+    <item>HDMI 1</item>
+    <item>HDMI 2</item>
+    <item>HDMI 3</item>
+</string-array>
+```
+
+- `HdmiHelper.hdmiSources()/hdmiLabels()` 统一读这两个数组；缺标签时自动回退成 `HDMI 1`、`HDMI 2`…
+- `HdmiHelper.switchToHdmi(ctx, index, toast)` 是新入口；`switchToHdmi2()`（Netflix/Prime 热键）
+  = 有第 2 项用第 2 项，否则第 1 项
+- 23 / 24 来自 `/system/etc/mitv.config.xml` 的 `hdmi3_order` / `hdmi2_order`（内部编号和背板丝印相反），
+  但在框架里没有对应 TvInput，所以现在点下去只会把当前 HDMI 会话拆掉、退回「搜索信号中」
+
+### 15.2.1 `tools/probe_hdmi.sh --check`（逐个验证 config.xml 里的 id）
+
+```
+$ tools/probe_hdmi.sh --check
+config.xml 里的 HDMI id：23 24 25
+id     结果   证据
+23     fail    can not get input source (框架里没有这个源)
+24     fail    同上
+25     OK      com.droidlogic.tvinput/.services.Hdmi1InputService/HW5 (video events: 2)
+```
+
+判定标准：日志里出现 `createSessionInternalLocked` 才算真的切到了；
+`can not get input source` 说明这个 id 在框架里根本不存在（拿一个不存在的 id 如 40 试，报错一模一样）。
+注意：**没插设备的口框架可能压根不注册**，所以要验证 HDMI 1 / HDMI 2，必须先往那两个口插一个开机的设备再跑一次。
+
+### 15.3 顺带发现
+
+- **AV（`source_av=17`）在这台机器上同样切不动**（同一个 `can not get input source`），
+  因为框架没注册 AV 直通输入；要用 AV 得走 `AtvActivity`（模拟电视）那条路，后续再改。
+- 找不到 id 时的排查顺序（换个机型时照做）：
+  1. `tools/probe_hdmi.sh --dump` 看这台机器注册了哪些 TvInput
+  2. `tools/probe_hdmi.sh --watch`，然后用原遥控器在系统设置里切一次，日志里 `setCurrentSource source=N` 就是答案
+  3. `tools/probe_hdmi.sh --sweep` 暴力扫 0..40，只有真的注册了的 id 才会出现 `createSessionInternalLocked`
