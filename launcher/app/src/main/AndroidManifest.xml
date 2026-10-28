@@ -28,6 +28,13 @@
         android:directBootAware="true"
         android:allowBackup="false">
 
+        <!-- Xiaomi's TV SDK (mitv.tv.*, used by MiTVTVPlayer). Optional: on Google TV / Realtek
+             sets the library is missing, the APK still installs, and AutoInput falls back to
+             TvInputManager for HDMI detection. -->
+        <uses-library
+            android:name="com.xiaomi.mitv.api"
+            android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

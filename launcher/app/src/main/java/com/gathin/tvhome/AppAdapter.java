@@ -546,7 +546,13 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
                 return;
             }
             if (e.launchIntent != null) {
-                // Switch directly to HDMI 2 (Jio TV) or selected input
+                // Switch directly to HDMI 2 (Jio TV) or selected input. The source id is in the
+                // intent extra; remember it so the next boot restores the same input.
+                if (e.launchIntent.getBooleanExtra("live_tv", false)) {
+                    AutoInput.noteSelectedLiveTv(ctx);
+                } else {
+                    AutoInput.noteSelectedSource(ctx, e.launchIntent.getIntExtra("input", -1));
+                }
                 ctx.startActivity(e.launchIntent);
             } else {
                 // Regular app launch

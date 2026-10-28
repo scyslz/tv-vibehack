@@ -209,6 +209,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         wallpaper = findViewById(R.id.wallpaper);
         updateWallpaper(false);
         BootReceiver.ensureAccessibilityEnabled(this);
+        AutoInput.ensureStarted(this);
 
         grid = findViewById(R.id.grid);
         gridWindow = findViewById(R.id.gridWindow);
@@ -1018,6 +1019,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      * is still offline a few short retries run so the SSID appears within a second of associating.
      */
     private void updateWifiLabel() {
+        // ConnectivityManager.NetworkCallback runs on its own HandlerThread. Touching the pill from
+        // there throws CalledFromWrongThreadException and kills the launcher right after boot -
+        // which also lost the pending HDMI auto-switch. Always hop back to the main thread.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post(this::updateWifiLabel);
+            return;
+        }
         if (btnWifi == null) return;
         String text = currentWifiLabel();
         btnWifi.setText(text);
@@ -1138,6 +1146,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** Shows the name of the connected Bluetooth accessory, or a short state when nothing is connected. */
     private void updateBluetoothLabel() {
+        // BluetoothProfile.ServiceListener can be delivered on a binder thread on some ROMs.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post(this::updateBluetoothLabel);
+            return;
+        }
         if (btnBluetooth == null) return;
         BluetoothAdapter a = BluetoothAdapter.getDefaultAdapter();
         String text;
@@ -1298,8 +1311,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
         LinearLayout rows = panel.findViewById(R.id.rows);
 
-        // Compact: as wide as the Inputs pill (a touch wider so "HDMI 1" fits), hanging right below it.
-        int width = Math.max(anchor.getWidth(), (int) (150 * density));
+        // Compact: as wide as the Inputs pill (wider so the boot row's "开机进入 / 开" fits),
+        // hanging right below it.
+        int width = Math.max(anchor.getWidth(), (int) (170 * density));
         final PopupWindow popup = new PopupWindow(panel, width, ViewGroup.LayoutParams.WRAP_CONTENT, true);
         popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));   // needed for Back to dismiss
         popup.setOutsideTouchable(true);
@@ -1315,14 +1329,25 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 final int source = hdmi[i];
                 final String label = hdmiNames[i];
                 addInputRow(rows, popup, R.drawable.ic_input, label, -1, "hdmi_" + (i + 1),
-                        () -> open(HdmiHelper.createMiSourceIntent(this, source)));
+                        () -> {
+                            AutoInput.noteSelectedSource(this, source);
+                            open(HdmiHelper.createMiSourceIntent(this, source));
+                        });
             }
             addSeparator(rows);
+            final int avSource = getResources().getInteger(R.integer.source_av);
             addInputRow(rows, popup, R.drawable.ic_av, "AV Input", -1, "av_input",
-                    () -> open(HdmiHelper.createMiSourceIntent(this,
-                            getResources().getInteger(R.integer.source_av))));
+                    () -> {
+                        AutoInput.noteSelectedSource(this, avSource);
+                        open(HdmiHelper.createMiSourceIntent(this, avSource));
+                    });
             addInputRow(rows, popup, R.drawable.ic_livetv, getString(R.string.live_tv), -1, "live_tv",
-                    () -> open(HdmiHelper.createTvIntent(this)));
+                    () -> {
+                        AutoInput.noteSelectedLiveTv(this);
+                        open(HdmiHelper.createTvIntent(this));
+                    });
+            addSeparator(rows);
+            addAutoSwitchRow(rows, popup);
         } else {
         TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
         if (tim != null) {
@@ -1371,6 +1396,39 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         panel.animate().alpha(1f).scaleY(1f).translationY(0f).setDuration(220)
                 .setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f)).start();
         rows.getChildAt(0).requestFocus();
+    }
+
+    /** Boot-only "enter last input" toggle; it never polls or switches while the TV is in use. */
+    private void addAutoSwitchRow(LinearLayout rows, PopupWindow popup) {
+        int[] sources = HdmiHelper.autoSources(this);
+        if (sources.length == 0) return;
+
+        View row = getLayoutInflater().inflate(R.layout.item_input, rows, false);
+        ((ImageView) row.findViewById(R.id.icon)).setImageResource(R.drawable.ic_input);
+        ((TextView) row.findViewById(R.id.title)).setText(R.string.auto_input);
+        TextView status = row.findViewById(R.id.status);
+        View dot = row.findViewById(R.id.dot);
+        showAutoSwitchState(status, dot);
+
+        row.setOnClickListener(v -> {
+            boolean enabled = !AutoInput.isEnabled(this);
+            AutoInput.setEnabled(this, enabled);
+            Toast.makeText(this, enabled
+                            ? getString(R.string.auto_input_on_toast)
+                            : getString(R.string.auto_input_off_toast),
+                    Toast.LENGTH_SHORT).show();
+            popup.dismiss();
+        });
+        bindRowFocusTint(row, (TextView) row.findViewById(R.id.title),
+                (ImageView) row.findViewById(R.id.icon));
+        rows.addView(row);
+    }
+
+    private void showAutoSwitchState(TextView status, View dot) {
+        boolean on = AutoInput.isEnabled(this);
+        status.setText(on ? R.string.auto_input_on : R.string.auto_input_off);
+        status.setVisibility(View.VISIBLE);
+        dot.setVisibility(on ? View.VISIBLE : View.GONE);
     }
 
     private void addSeparator(LinearLayout rows) {

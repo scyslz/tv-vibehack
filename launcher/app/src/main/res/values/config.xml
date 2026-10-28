@@ -62,6 +62,19 @@
     </string-array>
     <integer name="source_av">17</integer>
 
+    <!-- Boot-only input restore. If the last source was Live TV, it is reopened directly;
+         otherwise all external sources (HDMI 1/2/3 + AV) are checked: the remembered last source
+         wins, then auto_hdmi_index (0-based, 2 = HDMI 3), then config order. auto_hdmi_boot_delay_ms
+         is the first check after boot; auto_hdmi_boot_window_ms is how long to keep waiting for a
+         slow set-top box. After that the watcher stops - it does not steal the screen while the TV
+         is being used. The TvInput hardware id fragment is the fallback for the auto_hdmi_index port
+         when the Xiaomi SourceManager is unavailable; on this Mi TV 4A the framework registers
+         Hdmi1InputService/HW5 for HDMI 3. -->
+    <integer name="auto_hdmi_index">2</integer>
+    <integer name="auto_hdmi_boot_delay_ms">10000</integer>
+    <integer name="auto_hdmi_boot_window_ms">60000</integer>
+    <string name="auto_hdmi_tvinput_hint" translatable="false">HW5</string>
+
     <!-- Tiles per row in the grid; the dock always has this many slots. -->
     <integer name="columns">4</integer>
 

@@ -32,4 +32,9 @@
     <string name="uninstall_no_installer">未找到系统卸载程序</string>
     <string name="uninstall_done">已卸载：%1$s</string>
     <string name="uninstall_failed">没有卸载成功：%1$s</string>
+    <string name="auto_input">开机进入</string>
+    <string name="auto_input_on">开</string>
+    <string name="auto_input_off">关</string>
+    <string name="auto_input_on_toast">已开启：开机自动进入上次的输入源</string>
+    <string name="auto_input_off_toast">已关闭：开机停在桌面</string>
 </resources>

@@ -33,6 +33,8 @@ public class HomeKeyService extends AccessibilityService {
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        // The accessibility service is the most reliable long-lived host for the input watcher.
+        AutoInput.ensureStarted(this);
         try {
             for (String p : getResources().getStringArray(R.array.stock_launchers)) {
                 if (!p.trim().isEmpty()) stockLaunchers.add(p.trim());

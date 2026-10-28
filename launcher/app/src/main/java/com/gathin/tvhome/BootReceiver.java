@@ -3,6 +3,7 @@ package com.gathin.tvhome;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.os.UserManager;
 import android.provider.Settings;
 import android.util.Log;
@@ -21,6 +22,8 @@ public class BootReceiver extends BroadcastReceiver {
         Log.i(TAG, "Received boot/power broadcast: " + action);
 
         ensureAccessibilityEnabled(context);
+        // Start the input restorer early; the actual boot check is scheduled below.
+        AutoInput.ensureStarted(context);
 
         // LOCKED_BOOT_COMPLETED / QUICKBOOT_POWERON can arrive while user 0 is still locked. Starting
         // the home screen then paints it once from the direct-boot process, and the system tears that
@@ -33,10 +36,17 @@ public class BootReceiver extends BroadcastReceiver {
         }
 
         launchHome(context);
+        // After the desktop is up, enter the last input (or HDMI 3) if it has a signal. The delay
+        // keeps the boot from being stolen by the input activity.
+        AutoInput.scheduleBootSwitch(context);
     }
 
     /** False while the device is in direct boot (credential-encrypted storage still locked). */
     private static boolean isUserUnlocked(Context context) {
+        // UserManager.isUserUnlocked() only exists on API 24+. Calling it directly on this API 23
+        // Mi TV throws NoSuchMethodError (an Error, not an Exception), crashing BOOT_COMPLETED
+        // before the home screen or the HDMI auto-switch could run.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return true;
         try {
             UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
             return um == null || um.isUserUnlocked();

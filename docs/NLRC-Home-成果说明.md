@@ -590,3 +590,251 @@ id     结果   证据
   1. `tools/probe_hdmi.sh --dump` 看这台机器注册了哪些 TvInput
   2. `tools/probe_hdmi.sh --watch`，然后用原遥控器在系统设置里切一次，日志里 `setCurrentSource source=N` 就是答案
   3. `tools/probe_hdmi.sh --sweep` 暴力扫 0..40，只有真的注册了的 id 才会出现 `createSessionInternalLocked`
+
+---
+
+## 16. 自动输入：开机 / 插播都自动切到 HDMI 3（2026-10-28，versionCode 4 / 2.2）
+
+### 16.1 需求
+
+电视设置里把 HDMI 3 设成默认输入源后，每次开机仍然停在 NLRC 桌面，必须再手动选一次。
+希望：**只要检测到 HDMI 3 有信号就自动切过去**，不管当前在桌面还是某个应用里；开机时也一样。
+
+### 16.2 实现（新增 `AutoInput.java`）
+
+`AutoInput` 是一个进程内单例，由 `BootReceiver`、`HomeKeyService`、`MainActivity` 三处
+`ensureStarted()` 拉起，跑在自己的 `HandlerThread` 上；**只在开机窗口内每 2 秒检查**，窗口结束
+就停，不依赖 Activity 存活：
+
+| 场景 | 行为 |
+|---|---|
+| 开机（`BOOT_COMPLETED`） | 先让 `BootReceiver` 拉起桌面，10 秒后第一次检查；有信号就进，没信号继续等到 60 秒窗口结束 |
+| 桌面 / 任意应用运行中 | **不再监听，也不抢屏**（最终版只做开机切换） |
+| 用户按 Home 回桌面 | 不会被弹回输入源 |
+| 开机窗口内手动选了别的输入源 | `AutoInput.noteSelectedSource()` 取消这次开机进入 |
+| 开机窗口内只是按了遥控器 / 看桌面 | 仍按计划进入上次的输入源 |
+| 息屏 | 检查延后，亮屏后继续（仍受 60 秒窗口限制） |
+
+检测有两条独立通路（`AutoInput.readSignal()`）：
+
+1. **小米厂商 SDK（优先）**：反射调用
+   `mitv.tv.TvContext.getInstance().getSourceManager().isSourceConnected(sourceId)`。
+   这是从 `MiTVTVPlayer.apk` 里实测出来的接口（它自己用同一个 `SourceManager` 的
+   `onSourceSignalStable` / `setCurrentSource`；系统里预装的 Kookong TV SDK 也用它判断源是否连接）。
+   源 id 与 `source_hdmi` 数组一致，HDMI 3 = `25`。
+   这些 `mitv.tv.*` 类在共享库 `com.xiaomi.mitv.api` 里（`MiTVTVPlayer` / `tvmanager` 的
+   manifest 都声明了 `uses-library`），普通 App 的 classloader 默认看不到，所以
+   `AndroidManifest.xml` 里补了
+   `<uses-library android:name="com.xiaomi.mitv.api" android:required="false"/>`；
+   声明成非必需，其他品牌电视没有这个库也能安装，只是自动退回第 2 条检测。
+2. **公共 `TvInputManager`（兜底）**：遍历 `getTvInputList()`，找
+   `TYPE_HDMI` + `isPassthroughInput()` 的输入。真机日志显示，HDMI 3 插着时框架会注册
+   `com.droidlogic.tvinput/.services.Hdmi1InputService/HW5`，拔线时 `HW5` 从列表消失
+   （`TvInputManagerService: notifyInputRemovedLocked(...HW5)`），所以它本身就是可用的信号指示。
+   `config.xml` 的 `auto_hdmi_tvinput_hint`（默认 `HW5`）用来确认是同一个口。
+
+切换动作仍然复用已验证的 `HdmiHelper.createMiSourceIntent()`（`ExternalSourceActivity` +
+`input=25` + `no_launch_panel=true`），不新造切换通道。
+
+### 16.3 开关与配置
+
+- **Inputs 下拉菜单底部新增「开机进入」行**：状态只显示 `开 / 关`，OK 直接开关，
+  保存在 `SharedPreferences("home").auto_input_enabled`（默认开）。
+- `res/values/config.xml`：
+  ```xml
+  <integer name="auto_hdmi_index">2</integer>          <!-- 0-based，2 = HDMI 3 -->
+  <integer name="auto_hdmi_boot_delay_ms">10000</integer> <!-- 开机后等桌面稳定 -->
+  <integer name="auto_hdmi_boot_window_ms">60000</integer> <!-- 慢机顶盒的等待窗口 -->
+  <string name="auto_hdmi_tvinput_hint" translatable="false">HW5</string>
+  ```
+  换端口只改 `auto_hdmi_index`；换机型时用 `tools/probe_hdmi.sh --dump` 找对应的 TvInput id 片段。
+
+### 16.4 涉及文件
+
+- 新增：`launcher/app/src/main/java/com/gathin/tvhome/AutoInput.java`
+- 修改：`BootReceiver.java`（启动 watcher + 预约开机切换）、`HomeKeyService.java`（启动 watcher、
+  上报前台包名、Home 键取消开机切换）、`MainActivity.java`（启动 watcher、Inputs 菜单开关、
+  按键取消开机切换）、`res/values/config.xml`、`res/values/strings.xml`
+
+### 16.5 验证方法
+
+```bash
+# 看 watcher 是否起来、识别到哪个源
+adb -s 192.168.100.165:5555 logcat -s AutoInput
+
+# 预期：
+#   started: source=25 (HDMI 3), signal=true/false, vendor=true
+#   signal HDMI 3 -> true
+#   switched to HDMI 3 (source 25) - signal appeared
+
+# 场景 1：机顶盒已开，重启电视 -> 桌面出现约 10 秒后自动进上次的输入源
+# 场景 2：机顶盒启动慢 -> 60 秒窗口内一旦有信号就进
+# 场景 3：在输入源里按 Home -> 留在桌面，不会被弹回
+# 场景 4：关闭 Inputs 菜单里的「开机进入」-> 开机停在桌面
+```
+
+### 16.6 限制
+
+- 厂商 `isSourceConnected` 走反射，只在小米/Amlogic 这类带 `mitv.tv` 框架的机器上存在；
+  其他品牌会退回 `TvInputManager` 的 HDMI 输入检测，行为可能因 ROM 而异。
+- `HW5` 是这台 Mi TV 4A 的实测值；换 HDMI 口或换机型要同步改 `auto_hdmi_tvinput_hint`，
+  或把它留空让兜底逻辑接受任意 HDMI 输入。
+- 机顶盒如果待机时仍保持 HDMI 热插拔/信号，可能会被判定为「有信号」；此时用 Inputs 菜单里的开关
+  临时关闭即可（不影响手动选择输入源）。
+
+### 16.7 安装（沿用原有签名，可直接覆盖）
+
+```bash
+cd /home/hq/workspace/tv-vibehack
+adb connect 192.168.100.165:5555
+adb -s 192.168.100.165:5555 install -r launcher/app/build/outputs/apk/debug/app-debug.apk
+# 覆盖安装后重新开无障碍（脚本与 §3 相同）
+adb -s 192.168.100.165:5555 shell "settings put secure enabled_accessibility_services \
+  com.xiaomi.voicecontrol/com.xiaomi.voicecontrol.VoiceAccessibilityService:com.gathin.tvhome/com.gathin.tvhome.HomeKeyService; \
+  settings put secure accessibility_enabled 1"
+adb -s 192.168.100.165:5555 shell am force-stop com.gathin.tvhome
+adb -s 192.168.100.165:5555 shell am start -n com.gathin.tvhome/.MainActivity
+adb -s 192.168.100.165:5555 logcat -s AutoInput
+```
+
+### 16.8 真机验证（2026-10-28 22:11，电视在线）
+
+装 2.2 后实测：
+
+| 检查 | 结果 |
+|---|---|
+| 版本 | `versionName=2.2`（versionCode 4） |
+| watcher 启动 | `vendor SourceManager ready`、`HDMI TvInputs: [.../HW5]`、`started: active=HDMI 3, signals=[...], vendor=true` |
+| 模拟 `BOOT_COMPLETED` | `boot switch scheduled in 10000 ms` → 10 秒后 `switched to HDMI 3 (source 25) - boot`，前台变成 `ExternalSourceActivity` |
+| 在输入源里按 Home | 回到 `com.gathin.tvhome/.MainActivity`，后续无自动切回 |
+| Inputs 下拉 | UI 里能看到「开机进入」和「开」 |
+
+#### 16.8.1 顺带修掉的 API 23 崩溃（关键）
+
+第一次模拟开机时发现 `BootReceiver` 直接崩了：
+
+```
+java.lang.NoSuchMethodError: No virtual method isUserUnlocked()Z
+  in class Landroid/os/UserManager;
+  at com.gathin.tvhome.BootReceiver.isUserUnlocked(BootReceiver.java:47)
+```
+
+`UserManager.isUserUnlocked()` 是 **API 24** 才有的方法，这台电视是 **API 23**；`NoSuchMethodError`
+属于 `Error`，原来的 `catch (Exception)` 接不住，所以每次 `BOOT_COMPLETED` 进程都被杀，
+`launchHome()` 和 `AutoInput.scheduleBootSwitch()` 根本执行不到。这也解释了为什么之前
+「开机自动进桌面 / 自动切输入源」都不稳定——不是逻辑没写，是开机广播先崩了。
+
+修法：`BootReceiver.isUserUnlocked()` 里先判断 `Build.VERSION.SDK_INT < Build.VERSION_CODES.N`
+直接返回 `true`（API 23 没有 direct boot 用户锁的概念），再调用原方法。`AutoInput` 自己的
+`isUserUnlocked()` 用的是反射 + try/catch，不受影响。
+
+#### 16.8.2 第二个崩溃：Wi-Fi 回调在子线程改 UI（真机冷启动实测抓到）
+
+修完上面的 API 23 崩溃后，真实重启（22:19）又抓到：
+
+```
+FATAL EXCEPTION: ConnectivityManager
+android.view.ViewRootImpl$CalledFromWrongThreadException:
+  Only the original thread that created a view hierarchy can touch its views.
+  at MainActivity.updateWifiLabel(MainActivity.java:1033)
+  at MainActivity$7.onAvailable(MainActivity.java:1109)
+```
+
+`ConnectivityManager.NetworkCallback` 跑在自己的 HandlerThread 上；开机后 Wi-Fi 一关联就回调，
+直接 `btnWifi.setText()` 触发崩溃，进程在 **预约的 10 秒开机进入之前** 就被杀掉，所以桌面永远
+等不到 HDMI 3。修法：`MainActivity.updateWifiLabel()` / `updateBluetoothLabel()` 入口判断
+`Looper.myLooper() != Looper.getMainLooper()`，是子线程就 `handler.post(...)` 回主线程再改 UI。
+
+#### 16.8.3 开机检查跨进程恢复
+
+即使进程在 `BOOT_COMPLETED` 和 10 秒检查之间被杀，也不能把这次开机切换丢掉：
+
+- `scheduleBootSwitch()` 把 `auto_boot_check_at`（`elapsedRealtime`）写进 `SharedPreferences`；
+- `AutoInput.start()` 里的 `resumeBootCheck()` 在新进程中读回它；剩余时间在 `-15s ~ +30s`
+  内就继续等，超过 30s 视为上一次开机的残留值丢弃；
+- 如果进程在开机 2 分钟内、且 HDMI 有信号，再补一个 8 秒的兜底检查；
+- 成功 / 无信号 / 用户按键取消后写 `auto_boot_done=true`，避免进程重启后重复抢屏。
+
+实测强制杀进程再拉起：
+
+```
+AutoInput: boot switch scheduled in 10000 ms
+AutoInput: started: source=25 (HDMI 3), signal=true, vendor=true
+AutoInput: resumed boot switch, 6197 ms left
+AutoInput: switched to HDMI 3 (source 25) - boot
+```
+
+#### 16.8.4 真实冷启动结果（2026-10-28 22:26，用户确认成功）
+
+完整 `adb reboot` 后：
+
+```
+22:26:19  AutoInput: started: source=25 (HDMI 3), signal=true, vendor=true
+22:26:21  BootReceiver: Received boot/power broadcast: android.intent.action.BOOT_COMPLETED
+22:26:21  AutoInput: boot switch scheduled in 10000 ms
+22:26:33  AutoInput: switched to HDMI 3 (source 25) - boot
+```
+
+过程中没有 `AndroidRuntime` FATAL，前台变成 `ExternalSourceActivity`；随后遥控器发了一个
+`KEYCODE_BACK` 才回到桌面（这是用户主动操作，自动进入不会在信号一直存在时反复抢屏）。
+无障碍服务在真实重启后也保留了（`enabled_accessibility_services` 里仍有 `HomeKeyService`）；
+只有 `adb shell am force-stop com.gathin.tvhome` 会把它从列表里去掉，测试后需要重新设置。
+
+> 结论：电视设置里的「默认信号源」不再是必要条件；开机、待机唤醒（`QUICKBOOT_POWERON`）
+> 和运行中信号出现都会走 `AutoInput`。用户 2026-10-28 晚间确认「成功了」。
+
+### 16.9 最终形态：只做「开机进入」+ 所有输入源 + 记住上次（2026-10-28 23:10）
+
+用户明确：**只针对开机，不要运行中自动抢屏；UI 文案要短、能看懂。**
+
+最终行为：
+
+- Inputs 菜单底部只有一个开关行：**「开机进入 · 开/关」**（不是“自动切换”，也不再显示
+  “HDMI/AV · 开”这种长文案）；
+- 记住上次输入源：`last_input_source`；
+  - HDMI/AV 通过 `AutoInput.noteSelectedSource()`，Live TV 通过
+    `AutoInput.noteSelectedLiveTv()` 写入 `-2`；
+  - Inputs 菜单、Dock 输入磁贴、Netflix/Prime 热键都会在真正点击时记录；
+- 开机（`BOOT_COMPLETED` 后 10 秒）按顺序选：
+  1. 上次是 **Live TV** → 直接 `createTvIntent()` 进 Live TV；
+  2. 上次的 HDMI/AV 有信号 → 进那个口；
+  3. `auto_hdmi_index`（默认 HDMI 3）有信号 → 进 HDMI 3；
+  4. 其余 HDMI/AV 按配置顺序第一个有信号的；
+  5. 都没有 → 在 60 秒窗口内继续等（机顶盒启动慢也能等到），窗口结束就停在桌面。
+- **窗口结束后 `poll` 不再重排**，运行中没有任何 2 秒轮询、不会在桌面/应用上抢屏；
+- 窗口内只是按遥控器不会取消；只有手动选了别的输入源才取消（`noteSelectedSource` /
+  `noteSelectedLiveTv` 里的 `dropBootCheck()`）。
+
+UI 真机 dump：
+
+```
+Inputs
+HDMI 1
+HDMI 2
+HDMI 3
+AV Input
+Live TV
+开机进入        开
+```
+
+开机真机日志（`auto_input_enabled=true`）：
+
+```
+AutoInput: started: active=HDMI 3, signals=[HDMI 1=off, HDMI 2=off, HDMI 3=on, AV Input=off], vendor=true
+AutoInput: boot switch scheduled in 10000 ms (window 60000 ms)
+AutoInput: boot check: active=HDMI 3, signals=[...], enabled=true
+AutoInput: switched to HDMI 3 (source 25) - boot
+```
+
+`HdmiHelper.autoSources()` = HDMI 1/2/3 + AV，负责信号检测；Live TV 不参与信号检测，只参与
+“上次是它就开机恢复”。`TvInputManager` 兜底只对 `auto_hdmi_index` 那个口有效（`HW5`），
+厂商 SDK 可用时（本机 `vendor=true`）所有 HDMI/AV 都走 `isSourceConnected(sourceId)`；某个
+id 不被支持时只跳过该口（`sourceFailed[]`）。
+
+限制：这台 ROM 的 `dumpsys tv_input` 目前只有 `Hdmi1InputService/HW5`（HDMI 3）。HDMI 1/2 的
+source id 23/24、AV 的 17，要真的插上设备后才能验证是否能切；通用逻辑会检测并尝试，但没设备
+无法提前保证。
+
+> 另：实测这台电视的「网络调试」**重启后会关闭**（`adb reboot` 后 5555 拒绝连接），
+> 普通 App 无法可靠地自行打开 TCP ADB（需要写 `service.adb.tcp.port` / 厂商网络调试开关，
+> 属于系统权限）。需要远程调试时仍要手动开一次；这与开机进入无关。

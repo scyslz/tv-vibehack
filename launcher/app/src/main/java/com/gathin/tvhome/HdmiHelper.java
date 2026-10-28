@@ -74,6 +74,34 @@ public final class HdmiHelper {
         return labels;
     }
 
+    /**
+     * Every switchable external source, in menu order: the configured HDMI ports first, then AV.
+     * Live TV is deliberately not included: it is a tuner, not a plug-in source, and would always
+     * look "available", so auto-switching to it would steal the screen constantly.
+     */
+    public static int[] autoSources(Context ctx) {
+        int[] hdmi = hdmiSources(ctx);
+        int av;
+        try {
+            av = ctx.getResources().getInteger(R.integer.source_av);
+        } catch (Exception e) {
+            return hdmi;
+        }
+        int[] all = new int[hdmi.length + 1];
+        System.arraycopy(hdmi, 0, all, 0, hdmi.length);
+        all[hdmi.length] = av;
+        return all;
+    }
+
+    /** Labels for {@link #autoSources}, index for index. */
+    public static String[] autoLabels(Context ctx) {
+        String[] hdmi = hdmiLabels(ctx);
+        String[] all = new String[hdmi.length + 1];
+        System.arraycopy(hdmi, 0, all, 0, hdmi.length);
+        all[hdmi.length] = "AV Input";
+        return all;
+    }
+
     /** Explicit intent that tunes the Xiaomi TV player to a hardware source id. */
     public static Intent createMiSourceIntent(Context ctx, int source) {
         Intent intent = new Intent(Intent.ACTION_MAIN);
@@ -89,6 +117,7 @@ public final class HdmiHelper {
     public static Intent createTvIntent(Context ctx) {
         Intent intent = new Intent(Intent.ACTION_MAIN);
         intent.setClassName(MI_PLAYER, MI_TV_ACTIVITY);
+        intent.putExtra("live_tv", true);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         return intent;
     }
@@ -127,6 +156,7 @@ public final class HdmiHelper {
                     Toast.makeText(context.getApplicationContext(), label, Toast.LENGTH_SHORT).show();
                 }
                 if (isMiPlayer(context)) {
+                    AutoInput.noteSelectedSource(context, sources[slot]);
                     context.startActivity(createMiSourceIntent(context, sources[slot]));
                 } else {
                     context.startActivity(createHdmi2Intent());
